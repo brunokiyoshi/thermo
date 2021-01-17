@@ -271,6 +271,12 @@ class ViscosityLiquid(TPDependentProperty):
     units = 'Pa*s'
 
     @staticmethod
+    def interpolation_P(P):
+        '''log(P) interpolation transformation by default.
+        '''
+        return log(P)
+
+    @staticmethod
     def interpolation_T(T):
         '''Function to make the data-based interpolation as linear as possible.
         This transforms the input `T` into the `1/T` domain.'''
@@ -1066,7 +1072,7 @@ class ViscosityGas(TPDependentProperty):
         elif method == DIPPR_PERRY_8E:
             mu = EQ102(T, *self.Perrys2_312_coeffs)
         elif method == VDI_PPDS:
-            mu =  horner(self.VDI_PPDS_coeffs, T)
+            mu = horner(self.VDI_PPDS_coeffs, T)
         elif method == YOON_THODOS:
             mu = Yoon_Thodos(T, self.Tc, self.Pc, self.MW)
         elif method == STIEL_THODOS:

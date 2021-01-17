@@ -382,8 +382,6 @@ class RegularSolution(GibbsExcess):
         self._Hi_sums = Hi_sums = regular_solution_Hi_sums(self.SPs, self.Vs, self.lambda_coeffs, self.xsVs, self.N)
         return Hi_sums
 
-
-
     def d2GE_dxixjs(self):
         r'''Calculate and return the second mole fraction derivatives of excess
         Gibbs energy of a liquid phase using the regular solution model.
@@ -500,7 +498,7 @@ class RegularSolution(GibbsExcess):
         '''
         if self.scalar:
             return [0.0]*self.N
-        return zeros(N)
+        return zeros(self.N)
 
     def dGE_dT(self):
         r'''Calculate and return the temperature derivative of excess Gibbs

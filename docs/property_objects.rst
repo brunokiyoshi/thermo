@@ -47,8 +47,8 @@ Various data files will be searched to see if information such as Antoine coeffi
 
 >>> useless_psat = VaporPressure(CASRN='64-17-5', load_data=False)
 
-Object Methods
-^^^^^^^^^^^^^^
+Temperature-dependent Methods
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 As many methods may be available, a single method is always selected automatically during initialization. This method can be inspected with the :obj:`method <thermo.utils.TDependentProperty.method>` property; if no methods are available, `method` will be None. `method` is also a valid parameter when constructing the object, but if the method specified is not available an exception will be raised.
 
@@ -122,7 +122,7 @@ To better understand what methods are available, the :obj:`valid_methods <thermo
 >>> ethanol_psat.valid_methods(100)
 ['AMBROSE_WALTON', 'LEE_KESLER_PSAT', 'Edalat', 'BOILING_CRITICAL', 'SANJARI']
 
-If the temperature is not provided, all available methods are returned; the returned value always favors the methods by the ranking defined in thermo.
+If the temperature is not provided, all available methods are returned; the returned value favors the methods by the ranking defined in thermo, with the currently selected method as the first item.
 
 >>> ethanol_psat.valid_methods()
 ['WAGNER_MCGARRY', 'WAGNER_POLING', 'DIPPR_PERRY_8E', 'VDI_PPDS', 'COOLPROP', 'ANTOINE_POLING', 'VDI_TABULAR', 'AMBROSE_WALTON', 'LEE_KESLER_PSAT', 'Edalat', 'BOILING_CRITICAL', 'SANJARI']
@@ -277,7 +277,197 @@ Optionally, some derivatives and integrals can be provided for new methods as we
 
 Temperature and Pressure Dependent Properties
 ---------------------------------------------
+The pressure dependent objects work much like the temperature dependent ones; in fact, they subclass :obj:`TDependentProperty <thermo.utils.TDependentProperty>`.
+They have many new methods that require pressure as an input however. They work in two parts: a low-pressure correlation component, and a high-pressure correlation component. The high-pressure component usually but not always requires a low-pressure calculation to be performed first as its input.
 
+Creating Objects
+^^^^^^^^^^^^^^^^
+
+All arguments and information the property object requires must be provided in the constructor of the object. If a piece of information is not provided, whichever methods require it will not be available for that object. Many pressure-dependent property correlations are actually dependent on other properties being calculated first. A mapping of those dependencies is as follows:
+
+
+* Liquid molar volume: Depends on :obj:`VaporPressure <thermo.vapor_pressure.VaporPressure>`
+* Gas viscosity: Depends on :obj:`VolumeGas <thermo.volume.VolumeGas>`
+* Liquid viscosity: Depends on  :obj:`VaporPressure <thermo.vapor_pressure.VaporPressure>`
+* Gas thermal conductivity: Depends on :obj:`VolumeGas <thermo.volume.VolumeGas>`, :obj:`HeatCapacityGas <thermo.heat_capacity.HeatCapacityGas>`, :obj:`ViscosityGas <thermo.viscosity.ViscosityGas>`
+
+
+The required input objects should be created first, and provided as an input to the dependent object:
+
+>>> water_psat = VaporPressure(Tb=373.124, Tc=647.14, Pc=22048320.0, omega=0.344, CASRN='7732-18-5')
+>>> water_mu = ViscosityLiquid(CASRN="7732-18-5", MW=18.01528, Tm=273.15, Tc=647.14, Pc=22048320.0, Vc=5.6e-05, omega=0.344, method="DIPPR_PERRY_8E", Psat=water_psat, method_P="LUCAS")
+
+Various data files will be searched to see if information such as DIPPR expression coefficients are available for the compound during the initialization. This behavior can be avoided by setting the optional `load_data` argument to False.
+
+Pressure-dependent Methods
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The pressure and temperature dependent object selects a low-pressure and a high-pressure method automatically during initialization.
+These method can be inspected with the :obj:`method <thermo.utils.TPDependentProperty.method>` and :obj:`method_P <thermo.utils.TPDependentProperty.method_P>` properties.
+If no low-pressure methods are available, `method` will be None. If no high-pressure methods are available, `method_P` will be None. `method` and `method_P` are also valid parameters when constructing the object, but if either of the methods specified is not available an exception will be raised.
+
+>>> water_mu.method, water_mu.method_P
+('DIPPR_PERRY_8E', 'LUCAS')
+
+All available low-pressure methods can be found by inspecting the :obj:`all_methods <thermo.utils.TPDependentProperty.all_methods>` attribute:
+
+>>> water_mu.all_methods
+{'COOLPROP', 'DIPPR_PERRY_8E', 'VISWANATH_NATARAJAN_3', 'VDI_PPDS', 'LETSOU_STIEL'}
+
+All available high-pressure methods can be found by inspecting the :obj:`all_methods_P <thermo.utils.TPDependentProperty.all_methods_P>` attribute:
+
+>>> water_mu.all_methods_P
+{'COOLPROP', 'LUCAS'}
+
+Changing the low-pressure method or the high-pressure method is as easy as setting a new value to the attribute:
+
+>>> water_mu.method = 'VDI_PPDS'
+>>> water_mu.method
+'VDI_PPDS'
+>>> water_mu.method_P = 'COOLPROP'
+>>> water_mu.method_P
+'COOLPROP'
+
+Calculating Properties
+^^^^^^^^^^^^^^^^^^^^^^
+
+Calculation of the property at a specific temperature and pressure is as easy as calling the object which triggers the :obj:`__call__ <thermo.utils.TPDependentProperty.__call__>` method:
+
+>>> water_mu.method = 'VDI_PPDS'
+>>> water_mu.method_P = 'COOLPROP'
+>>> water_mu(T=300.0, P=1e5)
+0.000853742
+
+This is actually a cached wrapper around the specific call, :obj:`TP_dependent_property <thermo.utils.TPDependentProperty.TP_dependent_property>`:
+
+>>> water_mu.TP_dependent_property(300.0, P=1e5)
+0.000853742
+
+The caching of :obj:`__call__ <thermo.utils.TPDependentProperty.__call__>` is quite basic - the previously specified temperature and pressure are stored, and if the new `T` and `P` are the same as the previous `T` and `P` the previously calculated result is returned.
+
+There is a lower-level interface for calculating properties with a specified method by name, :obj:`calculate_P <thermo.utils.TDependentProperty.calculate_P>`. :obj:`TP_dependent_property <thermo.utils.TPDependentProperty.TP_dependent_property>` is a wrapper around  :obj:`calculate_P <thermo.utils.TDependentProperty.calculate_P>` that includes validation of the result.
+
+>>> water_mu.calculate_P(T=300.0, P=1e5, method='COOLPROP')
+0.000853742
+>>> water_mu.calculate_P(T=300.0, P=1e5, method='LUCAS')
+0.000865292
+
+The above examples all show using calculating the property with a pressure specified. The same :obj:`TDependentProperty <thermo.utils.TDependentProperty>` methods are available too, so all the low-pressure calculation calls are also available.
+
+>>> water_mu.calculate(T=300.0, method='VISWANATH_NATARAJAN_3')
+0.000856467
+>>> water_mu.T_dependent_property(T=400.0) 
+0.000217346
+
+Limits and Extrapolation
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The same temperature limits and low-pressure extrapolation methods are available as for :obj:`TDependentProperty <thermo.utils.TDependentProperty>`.
+
+>>> water_mu.valid_methods(T=480)
+['DIPPR_PERRY_8E', 'COOLPROP', 'VDI_PPDS', 'LETSOU_STIEL']
+>>> water_mu.extrapolation
+'linear'
+
+To better understand what methods are available, the :obj:`valid_methods_P <thermo.utils.TDependentProperty.valid_methods_P>` method checks all available high-pressure correlations against their temperature and pressure limits.
+
+>>> water_mu.valid_methods_P(T=300, P=1e9)
+['LUCAS', 'COOLPROP']
+>>> water_mu.valid_methods_P(T=300, P=1e10)
+['LUCAS']
+>>> water_mu.valid_methods_P(T=900, P=1e6)
+['LUCAS']
+
+If the temperature and pressure are not provided, all available methods are returned; the returned value favors the methods by the ranking defined in thermo, with the currently selected method as the first item.
+
+>>> water_mu.valid_methods_P()
+['LUCAS', 'COOLPROP']
+
+Plotting
+^^^^^^^^
+
+It is possible to compare the correlations graphically with the method :obj:`plot_TP_dependent_property <thermo.utils.TPDependentProperty.plot_TP_dependent_property>`.
+
+>>> water_mu.plot_TP_dependent_property(Tmin=400, Pmin=1e5, Pmax=1e8, methods_P=['COOLPROP','LUCAS'], pts=15, only_valid=False)
+
+.. plot:: plots/viscosity_water_0.py
+
+This can be a little confusing; but isotherms and isobars can be plotted as well, which are more straight forward. The respective methods are :obj:`plot_isotherm <thermo.utils.TPDependentProperty.plot_isotherm>` and :obj:`plot_isobar <thermo.utils.TPDependentProperty.plot_isobar>`:
+
+>>> water_mu.plot_isotherm(T=350, Pmin=1e5, Pmax=1e7, pts=50)
+
+.. plot:: plots/viscosity_water_1.py
+
+>>> water_mu.plot_isobar(P=1e7, Tmin=300, Tmax=600, pts=50)
+
+.. plot:: plots/viscosity_water_2.py
+
+Calculating Conditions From Properties
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The method is :obj:`solve_property <thermo.utils.TDependentProperty.solve_property>` works only on the low-pressure correlations.
+
+>>> water_mu.solve_property(1e-3)
+294.0711641
+
+Property Derivatives
+^^^^^^^^^^^^^^^^^^^^
+
+Functionality for calculating the temperature derivative of the property is implemented twice; as :obj:`T_dependent_property_derivative <thermo.utils.TDependentProperty.T_dependent_property_derivative>` using the low-pressure correlations, and as :obj:`TP_dependent_property_derivative_T <thermo.utils.TPDependentProperty.TP_dependent_property_derivative_T>` using the high-pressure correlations that require pressure as an input.
+
+>>> water_mu.T_dependent_property_derivative(300)
+-1.893961e-05
+>>> water_mu.TP_dependent_property_derivative_T(300, P=1e7)
+-1.927268e-05
+
+The derivatives are numerical unless a special implementation has been added to the property's :obj:`calculate_derivative_T <thermo.utils.TPDependentProperty.calculate_derivative_T>`  and/or :obj:`calculate_derivative <thermo.utils.TDependentProperty.calculate_derivative>` method.
+
+Higher order derivatives are available as well with the `order` argument.
+
+>>> water_mu.T_dependent_property_derivative(300.0, order=2)
+5.923372e-07
+>>> water_mu.TP_dependent_property_derivative_T(300.0, P=1e6, order=2)
+-1.40946e-06
+
+Functionality for calculating the pressure derivative of the property is also implemented as :obj:`TP_dependent_property_derivative_P <thermo.utils.TPDependentProperty.TP_dependent_property_derivative_P>`:
+
+>>> water_mu.TP_dependent_property_derivative_P(P=5e7, T=400)
+4.27782809e-13
+
+The derivatives are numerical unless a special implementation has been added to the property's  :obj:`calculate_derivative_P <thermo.utils.TPDependentProperty.calculate_derivative_P>` method.
+
+Higher order derivatives are available as well with the `order` argument.
+
+>>> water_mu.TP_dependent_property_derivative_P(P=5e7, T=400, order=2)
+-1.1858461e-15
+
+Property Integrals
+^^^^^^^^^^^^^^^^^^
+The same functionality for integrating over a property as in temperature-dependent objects is available, but only for integrating over temperature using low pressure correlations. No other use cases have been identified requiring integration over high-pressure conditions, or integration over the pressure domain.
+
+>>> water_mu.T_dependent_property_integral(300, 400) # Integrating over viscosity has no physical meaning
+0.04243
+
+Using Tabular Data
+^^^^^^^^^^^^^^^^^^
+
+If there are experimentally available data for a property at high and low pressure, an interpolation table can be created and used as follows. The CoolProp method is used to generate a small table, and is then added as a new method in the example below.
+
+>>> from thermo import *
+>>> import numpy as np
+>>> Ts = [300, 400, 500]
+>>> Ps = [1e5, 1e6, 1e7]
+>>> table = [[water_mu.calculate_P(T, P, "COOLPROP") for T in Ts] for P in Ps]
+>>> water_mu.method_P
+'LUCAS'
+>>> water_mu.add_tabular_data_P(Ts, Ps, table)
+>>> water_mu.method_P
+'Tabular data series #0'
+>>> water_mu(400, 1e7), water_mu.calculate_P(400, 1e7, "COOLPROP")
+(0.000221166933349, 0.000221166933349)
+>>> water_mu(450, 5e6), water_mu.calculate_P(450, 5e6, "COOLPROP")
+(0.00011340, 0.00015423)
+
+The more data points used, the closer a property will match.
 
 Mixture Properties
 ------------------
