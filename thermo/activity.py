@@ -69,8 +69,10 @@ from __future__ import division
 __all__ = ['GibbsExcess', 'IdealSolution']
 from fluids.constants import R, R_inv
 from fluids.numerics import numpy as np
-from chemicals.utils import exp
+from chemicals.utils import exp, log
 from chemicals.utils import normalize, dxs_to_dns, dxs_to_dn_partials, dns_to_dn_partials, d2xs_to_dxdn_partials
+from thermo import utils
+from thermo.utils import dump_json_np
 
 try:
     npexp, ones, zeros, array = np.exp, np.ones, np.zeros, np.array
@@ -95,6 +97,166 @@ def gibbs_excess_dHE_dxs(dGE_dxs, d2GE_dTdxs, N, T, dHE_dxs=None):
     for i in range(N):
         dHE_dxs[i] = -T*d2GE_dTdxs[i] + dGE_dxs[i]
     return dHE_dxs
+
+
+def gibbs_excess_dgammas_dns(xs, gammas, d2GE_dxixjs, N, T, dgammas_dns=None, vec0=None):
+    if vec0 is None:
+        vec0 = [0.0]*N
+    if dgammas_dns is None:
+        dgammas_dns = [[0.0]*N for _ in range(N)] # numba : delete
+#        dgammas_dns = zeros((N, N)) # numba : uncomment
+
+    for j in range(N):
+        tot = 0.0
+        row = d2GE_dxixjs[j]
+        for k in range(N):
+            tot += xs[k]*row[k]
+        vec0[j] = tot
+
+    RT_inv = R_inv/(T)
+
+    for i in range(N):
+        gammai_RT = gammas[i]*RT_inv
+        for j in range(N):
+            dgammas_dns[i][j] = gammai_RT*(d2GE_dxixjs[i][j] - vec0[j])
+
+    return dgammas_dns
+
+def gibbs_excess_dgammas_dT(xs, GE, dGE_dT, dG_dxs, d2GE_dTdxs, N, T, dgammas_dT=None):
+    if dgammas_dT is None:
+        dgammas_dT = [0.0]*N
+
+    xdx_totF0 = dGE_dT
+    for j in range(N):
+        xdx_totF0 -= xs[j]*d2GE_dTdxs[j]
+    xdx_totF1 = GE
+    for j in range(N):
+        xdx_totF1 -= xs[j]*dG_dxs[j]
+
+    T_inv = 1.0/T
+    RT_inv = R_inv*T_inv
+    for i in range(N):
+        dG_dni = xdx_totF1 + dG_dxs[i]
+        dgammas_dT[i] = RT_inv*(d2GE_dTdxs[i] - dG_dni*T_inv + xdx_totF0)*exp(dG_dni*RT_inv)
+    return dgammas_dT
+
+def interaction_exp(T, N, A, B, C, D, E, F, lambdas=None):
+    if lambdas is None:
+        lambdas = [[0.0]*N for i in range(N)] # numba: delete
+#        lambdas = zeros((N, N)) # numba: uncomment
+
+#        # 87% of the time of this routine is the exponential.
+    T2 = T*T
+    Tinv = 1.0/T
+    T2inv = Tinv*Tinv
+    logT = log(T)
+    for i in range(N):
+        Ai = A[i]
+        Bi = B[i]
+        Ci = C[i]
+        Di = D[i]
+        Ei = E[i]
+        Fi = F[i]
+        lambdais = lambdas[i]
+        # Might be more efficient to pass over this matrix later,
+        # and compute all the exps
+        # Spoiler: it was not.
+
+        # Also - it was tested the impact of using fewer terms
+        # there was very little, to no impact from that
+        # the exp is the huge time sink.
+        for j in range(N):
+            lambdais[j] = exp(Ai[j] + Bi[j]*Tinv
+                    + Ci[j]*logT + Di[j]*T
+                    + Ei[j]*T2inv + Fi[j]*T2)
+#            lambdas[i][j] = exp(A[i][j] + B[i][j]*Tinv
+#                    + C[i][j]*logT + D[i][j]*T
+#                    + E[i][j]*T2inv + F[i][j]*T2)
+#    135 µs ± 1.09 µs per loop (mean ± std. dev. of 7 runs, 10000 loops each) # without out specified numba
+#    129 µs ± 2.45 µs per loop (mean ± std. dev. of 7 runs, 10000 loops each) # with out specified numba
+#    118 µs ± 2.67 µs per loop (mean ± std. dev. of 7 runs, 10000 loops each) # without out specified numba 1 term
+#    115 µs ± 1.77 µs per loop (mean ± std. dev. of 7 runs, 10000 loops each) # with out specified numba 1 term
+
+    return lambdas
+
+
+def dinteraction_exp_dT(T, N, B, C, D, E, F, lambdas, dlambdas_dT=None):
+    if dlambdas_dT is None:
+        dlambdas_dT = [[0.0]*N for i in range(N)] # numba: delete
+#        dlambdas_dT = zeros((N, N)) # numba: uncomment
+
+    T2 = T + T
+    Tinv = 1.0/T
+    nT2inv = -Tinv*Tinv
+    nT3inv2 = 2.0*nT2inv*Tinv
+    for i in range(N):
+        lambdasi = lambdas[i]
+        Bi = B[i]
+        Ci = C[i]
+        Di = D[i]
+        Ei = E[i]
+        Fi = F[i]
+        dlambdas_dTi = dlambdas_dT[i]
+        for j in range(N):
+            dlambdas_dTi[j] = (T2*Fi[j] + Di[j] + Ci[j]*Tinv + Bi[j]*nT2inv
+                             + Ei[j]*nT3inv2)*lambdasi[j]
+    return dlambdas_dT
+
+def d2interaction_exp_dT2(T, N, B, C, E, F, lambdas, dlambdas_dT, d2lambdas_dT2=None):
+    if d2lambdas_dT2 is None:
+        d2lambdas_dT2 = [[0.0]*N for i in range(N)] # numba: delete
+#        d2lambdas_dT2 = zeros((N, N)) # numba: uncomment
+
+    Tinv = 1.0/T
+    nT2inv = -Tinv*Tinv
+    T3inv2 = -2.0*nT2inv*Tinv
+    T4inv6 = 3.0*T3inv2*Tinv
+    for i in range(N):
+        lambdasi = lambdas[i]
+        dlambdas_dTi = dlambdas_dT[i]
+        Bi = B[i]
+        Ci = C[i]
+        Ei = E[i]
+        Fi = F[i]
+        d2lambdas_dT2i = d2lambdas_dT2[i]
+        for j in range(N):
+            d2lambdas_dT2i[j] = ((2.0*Fi[j] + nT2inv*Ci[j]
+                             + T3inv2*Bi[j] + T4inv6*Ei[j]
+                               )*lambdasi[j] + dlambdas_dTi[j]*dlambdas_dTi[j]/lambdasi[j])
+    return d2lambdas_dT2
+
+def d3interaction_exp_dT3(T, N, B, C, E, F, lambdas, dlambdas_dT, d3lambdas_dT3=None):
+    if d3lambdas_dT3 is None:
+        d3lambdas_dT3 = [[0.0]*N for i in range(N)] # numba: delete
+#        d3lambdas_dT3 = zeros((N, N)) # numba: uncomment
+
+    Tinv = 1.0/T
+    Tinv3 = 3.0*Tinv
+    nT2inv = -Tinv*Tinv
+    nT2inv05 = 0.5*nT2inv
+    T3inv = -nT2inv*Tinv
+    T3inv2 = T3inv+T3inv
+    T4inv3 = 1.5*T3inv2*Tinv
+    T2_12 = -12.0*nT2inv
+
+    for i in range(N):
+        lambdasi = lambdas[i]
+        dlambdas_dTi = dlambdas_dT[i]
+        Bi = B[i]
+        Ci = C[i]
+        Ei = E[i]
+        Fi = F[i]
+        d3lambdas_dT3i = d3lambdas_dT3[i]
+        for j in range(N):
+            term2 = (Fi[j] + nT2inv05*Ci[j] + T3inv*Bi[j] + T4inv3*Ei[j])
+
+            term3 = dlambdas_dTi[j]/lambdasi[j]
+
+            term4 = (T3inv2*(Ci[j] - Tinv3*Bi[j] - T2_12*Ei[j]))
+
+            d3lambdas_dT3i[j] = ((term3*(6.0*term2 + term3*term3) + term4)*lambdasi[j])
+
+    return d3lambdas_dT3
 
 class GibbsExcess(object):
     r'''Class for representing an activity coefficient model.
@@ -123,6 +285,78 @@ class GibbsExcess(object):
         # Other classes with different parameters should expose them here too
         s = '%s(T=%s, xs=%s)' %(self.__class__.__name__, repr(self.T), repr(self.xs))
         return s
+
+    def as_JSON(self):
+        r'''Method to create a JSON serialization of the Gibbs Excess model
+        which can be stored, and reloaded later.
+
+        Returns
+        -------
+        json_repr : str
+            Json representation, [-]
+
+        Notes
+        -----
+
+        Examples
+        --------
+        >>> model = IdealSolution(T=300.0, xs=[.1, .2, .3, .4])
+        >>> string = model.as_JSON()
+        >>> type(string)
+        str
+        '''
+        # vaguely jsonpickle compatible
+        mod_name = self.__class__.__module__
+        d = self.__dict__
+        d["py/object"] = "%s.%s" %(mod_name, self.__class__.__name__)
+        d["json_version"] = 1
+        if self.scalar:
+            ans = utils.json.dumps(self.__dict__)
+        else:
+            ans = dump_json_np(self.__dict__)
+        del d["py/object"]
+        del d["json_version"]
+        return ans
+
+    @classmethod
+    def from_JSON(cls, json_repr):
+        r'''Method to create a Gibbs Excess model from a JSON
+        serialization of another Gibbs Excess model.
+
+        Parameters
+        ----------
+        json_repr : str
+            JSON representation, [-]
+
+        Returns
+        -------
+        model : :obj:`GibbsExcess`
+            Newly created object from the json serialization, [-]
+
+        Notes
+        -----
+        It is important that the input string be in the same format as that
+        created by :obj:`GibbsExcess.as_JSON`.
+
+        Examples
+        --------
+        >>> model = IdealSolution(T=300.0, xs=[.1, .2, .3, .4])
+        >>> string = model.as_JSON()
+        >>> new_model = GibbsExcess.from_JSON(string)
+        >>> assert model.__dict__ == new_model.__dict__
+        '''
+
+        d = utils.json.loads(json_repr)
+
+#        if cls is GibbsExcess:
+#            model_name = d['py/object']
+
+        del d['py/object']
+        del d["json_version"]
+
+        new = cls.__new__(cls)
+        new.__dict__ = d
+        return new
 
     def HE(self):
         r'''Calculate and return the excess entropy of a liquid phase using an
@@ -308,6 +542,7 @@ class GibbsExcess(object):
         .. math::
             \frac{\partial S^E}{\partial x_i} = \frac{1}{T}\left( \frac{\partial h^E}
             {\partial x_i} - \frac{\partial g^E}{\partial x_i}\right)
+            = -\frac{\partial^2 g^E}{\partial x_i \partial T}
 
         Returns
         -------
@@ -322,12 +557,16 @@ class GibbsExcess(object):
             return self._dSE_dxs
         except:
             pass
-        # Derived by hand.
-        dGE_dxs = self.dGE_dxs()
-        dHE_dxs = self.dHE_dxs()
-        T_inv = 1.0/self.T
-        self._dSE_dxs = [T_inv*(dHE_dxs[i] - dGE_dxs[i]) for i in self.cmps]
-        return self._dSE_dxs
+        try:
+            d2GE_dTdxs = self._d2GE_dTdxs
+        except:
+            d2GE_dTdxs = self.d2GE_dTdxs()
+        if self.scalar:
+            dSE_dxs = [-v for v in d2GE_dTdxs]
+        else:
+            dSE_dxs = -d2GE_dTdxs
+        self._dSE_dxs = dSE_dxs
+        return dSE_dxs
 
     def dSE_dns(self):
         r'''Calculate and return the mole number derivative of excess
@@ -554,22 +793,12 @@ class GibbsExcess(object):
         except AttributeError:
             pass
         gammas = self.gammas()
-        cmps = self.cmps
-
+        N = self.N
+        xs = self.xs
         d2GE_dxixjs = self.d2GE_dxixjs()
-        d2nGE_dxjnis = d2xs_to_dxdn_partials(d2GE_dxixjs, self.xs)
 
-        RT_inv = 1.0/(R*self.T)
-
-        self._dgammas_dns = matrix = []
-        for i in cmps:
-            row = []
-            gammai = gammas[i]
-            for j in cmps:
-                v = gammai*d2nGE_dxjnis[i][j]*RT_inv
-                row.append(v)
-            matrix.append(row)
-        return matrix
+        self._dgammas_dns = dgammas_dns = gibbs_excess_dgammas_dns(xs, gammas, d2GE_dxixjs, N, self.T)
+        return dgammas_dns
 
 #    def dgammas_dxs(self):
         # TODO - compare with UNIFAC, which has a dx derivative working
@@ -629,7 +858,6 @@ class GibbsExcess(object):
             \frac{{\frac{\partial n_i G^E}{\partial n_i }}}{RT^2}\right)
              \exp\left(\frac{\frac{\partial n_i G^E}{\partial n_i }}{RT}\right)
 
-
         Returns
         -------
         dgammas_dT : list[float]
@@ -648,18 +876,13 @@ class GibbsExcess(object):
             return self._dgammas_dT
         except AttributeError:
             pass
-        d2nGE_dTdns = self.d2nGE_dTdns()
-
-        dG_dxs = self.dGE_dxs()
+        N, T, xs = self.N, self.T, self.xs
+        dGE_dT = self.dGE_dT()
         GE = self.GE()
-        dG_dns = dxs_to_dn_partials(dG_dxs, self.xs, GE)
-
-        T_inv = 1.0/self.T
-        RT_inv = R_inv*T_inv
-        self._dgammas_dT = dgammas_dT = []
-        for i in self.cmps:
-            x1 = dG_dns[i]*T_inv
-            dgammas_dT.append(RT_inv*(d2nGE_dTdns[i] - x1)*exp(dG_dns[i]*RT_inv))
+        dG_dxs = self.dGE_dxs()
+        d2GE_dTdxs = self.d2GE_dTdxs()
+        dgammas_dT = gibbs_excess_dgammas_dT(xs, GE, dGE_dT, dG_dxs, d2GE_dTdxs, N, T)
+        self._dgammas_dT = dgammas_dT
         return dgammas_dT
 
 
@@ -697,7 +920,6 @@ class IdealSolution(GibbsExcess):
         if xs is not None:
             self.xs = xs
             self.N = len(xs)
-            self.cmps = range(self.N)
             self.scalar = type(xs) is list
         else:
             self.scalar = True
@@ -733,7 +955,6 @@ class IdealSolution(GibbsExcess):
         new.xs = xs
         new.scalar = self.scalar
         new.N = len(xs)
-        new.cmps = range(new.N)
         return new
 
     def GE(self):
@@ -824,7 +1045,7 @@ class IdealSolution(GibbsExcess):
         -----
         '''
         if self.scalar:
-            return [0.0 for i in self.cmps]
+            return [0.0]*self.N
         return zeros(self.N)
 
     def dGE_dxs(self):
@@ -844,7 +1065,7 @@ class IdealSolution(GibbsExcess):
         -----
         '''
         if self.scalar:
-            return [0.0 for i in self.cmps]
+            return [0.0]*self.N
         return zeros(self.N)
 
     def d2GE_dxixjs(self):
@@ -865,7 +1086,7 @@ class IdealSolution(GibbsExcess):
         '''
         N = self.N
         if self.scalar:
-            return [[0.0]*N for i in self.cmps]
+            return [[0.0]*N for i in range(self.N)]
         return zeros((N, N))
 
     def d3GE_dxixjxks(self):
@@ -884,14 +1105,14 @@ class IdealSolution(GibbsExcess):
         Notes
         -----
         '''
-        N, cmps = self.N, self.cmps
+        N = self.N
         if self.scalar:
-            return [[[0.0]*N for i in cmps] for j in cmps]
+            return [[[0.0]*N for i in range(N)] for j in range(N)]
         return zeros((N, N, N))
 
     def gammas(self):
         if self.scalar:
-            return [1.0 for i in self.cmps]
+            return [1.0]*self.N
         else:
             return ones(self.N)
 

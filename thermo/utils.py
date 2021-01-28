@@ -40,16 +40,27 @@ Temperature Dependent
              calculate_derivative, T_dependent_property_derivative,
              calculate_integral, T_dependent_property_integral,
              calculate_integral_over_T, T_dependent_property_integral_over_T,
-             extrapolate, test_method_validity, calculate, tabular_extrapolation_permitted,
+             extrapolate, test_method_validity, calculate, from_JSON, as_JSON,
              interpolation_T, interpolation_T_inv, interpolation_property,  interpolation_property_inv, T_limits, all_methods
    :undoc-members:
 
 Temperature and Pressure Dependent
 ----------------------------------
 .. autoclass:: TPDependentProperty
-    :members:
-    :undoc-members:
-    :show-inheritance:
+   :members: name, units, extrapolation, property_min, property_max,
+             ranked_methods, __call__,
+             method, valid_methods, test_property_validity,
+             add_method, add_tabular_data, solve_property,
+             extrapolate, test_method_validity, calculate,
+             interpolation_T, interpolation_T_inv, interpolation_property,
+             interpolation_property_inv, T_limits, all_methods, all_methods_P,
+             method_P, valid_methods_P, TP_dependent_property,
+             TP_or_T_dependent_property, add_tabular_data_P, plot_isotherm,
+             plot_isobar, plot_TP_dependent_property, calculate_derivative_T,
+             calculate_derivative_P, TP_dependent_property_derivative_T,
+             TP_dependent_property_derivative_P
+   :undoc-members:
+   :show-inheritance:
 
 Temperature, Pressure, and Composition Dependent
 ------------------------------------------------
@@ -72,12 +83,79 @@ import os
 from cmath import sqrt as csqrt
 from fluids.numerics import quad, brenth, newton, secant, linspace, polyint, polyint_over_x, derivative, polyder, horner, horner_and_der2, quadratic_from_f_ders, assert_close, numpy as np
 from fluids.constants import R
-from chemicals.utils import isnan, isinf, log, exp, ws_to_zs, zs_to_ws, e
+from chemicals.utils import PY37, isnan, isinf, log, exp, ws_to_zs, zs_to_ws, e
 from chemicals.utils import mix_multiple_component_flows, hash_any_primitive
 from chemicals.vapor_pressure import Antoine, Antoine_coeffs_from_point, Antoine_AB_coeffs_from_point, DIPPR101_ABC_coeffs_from_point
 from chemicals.dippr import EQ101
 from chemicals.phase_change import Watson, Watson_n
 
+
+BasicNumpyEncoder = None
+def build_numpy_encoder():
+    '''Create a basic numpy encoder for json applications. All np ints become
+    Python ints; numpy floats become python floats; and all arrays become
+    lists-of-lists of floats, ints, bools, or complexes according to Python's
+    rules.
+    '''
+    global BasicNumpyEncoder, json
+
+    import json
+    int_types = frozenset([np.short, np.ushort, np.intc, np.uintc, np.int_,
+                           np.uint, np.longlong, np.ulonglong])
+    float_types = frozenset([np.float16, np.single, np.double, np.longdouble,
+                             np.csingle, np.cdouble, np.clongdouble])
+    ndarray = np.ndarray
+    JSONEncoder = json.JSONEncoder
+
+    class BasicNumpyEncoder(JSONEncoder):
+        def default(self, obj):
+            t = type(obj)
+            if t is ndarray:
+                return obj.tolist()
+            elif t in int_types:
+                return int(obj)
+            elif t in float_types:
+                return float(obj)
+            return JSONEncoder.default(self, obj)
+
+def _load_orjson():
+    global orjson
+    import orjson
+
+def dump_json_np(obj, library='json'):
+    '''Serialization tool that handles numpy arrays. By default this will
+    use the standard library json, but this can also use orjson.'''
+    if library == 'json':
+        if BasicNumpyEncoder is None:
+            build_numpy_encoder()
+        return json.dumps(obj, cls=BasicNumpyEncoder)
+    elif library == 'orjson':
+        if orjson is None:
+            _load_orjson()
+        opt = orjson.OPT_SERIALIZE_NUMPY
+        return orjson.dumps(obj, option=opt)
+
+
+json_loaded = False
+def _load_json():
+    global json
+    import json
+    json_loaded = True
+
+global json, orjson
+orjson = None
+
+if PY37:
+    def __getattr__(name):
+        global json, json_loaded
+        if name == 'json':
+            import json
+            json_loaded = True
+            return json
+        raise AttributeError("module %s has no attribute %s" %(__name__, name))
+else:
+    import json
+    json_loaded = True
 
 NEGLIGIBLE = 'NEGLIGIBLE'
 DIPPR_PERRY_8E = 'DIPPR_PERRY_8E'
@@ -702,31 +780,24 @@ class TDependentProperty(object):
     Attributes
     ----------
     name : str
-        The name of the property being calculated
+        The name of the property being calculated, [-]
     units : str
-        The units of the property
+        The units of the property, [-]
     method : str
-        The method was which was last used successfully to calculate a property;
-        set only after the first property calculation.
-    forced : bool
-        If True, only user specified methods will be considered; otherwise all
-        methods will be considered if none of the user specified methods succeed
-    interpolation_T : function
+        The method to be used for property calculations, [-]
+    interpolation_T : callable or None
         A function or lambda expression to transform the temperatures of
         tabular data for interpolation; e.g. 'lambda self, T: 1./T'
-    interpolation_T_inv : function
+    interpolation_T_inv : callable or None
         A function or lambda expression to invert the transform of temperatures
         of tabular data for interpolation; e.g. 'lambda self, x: self.Tc*(1 - x)'
-    interpolation_property : function
+    interpolation_property : callable or None
         A function or lambda expression to transform tabular property values
         prior to interpolation; e.g. 'lambda self, P: log(P)'
-    interpolation_property_inv : function
+    interpolation_property_inv : callable or None
         A function or property expression to transform interpolated property
         values from the transform performed by :obj:`interpolation_property` back
         to their actual form, e.g.  'lambda self, P: exp(P)'
-    tabular_extrapolation_permitted : bool
-        Whether or not to allow extrapolation from tabulated data for a
-        property
     Tmin : float
         Maximum temperature at which no method can calculate the property above;
         set based on rough rules for some methods. Used to solve for a
@@ -816,6 +887,9 @@ class TDependentProperty(object):
     '''Dictionary containing method: max_n, for use in methods which should
     only ever be fit to a `n` value equal to or less than `n`'''
 
+    pure_references = ()
+    pure_reference_types = ()
+
     def __copy__(self):
         return self
 
@@ -823,16 +897,39 @@ class TDependentProperty(object):
         # By default, share state among subsequent objects
         return self
 
+    def __eq__(self, other):
+        return self.__hash__() == other.__hash__()
+
+    hash_ignore_props = ('linear_extrapolation_coeffs', 'Antoine_AB_coeffs',
+                         'DIPPR101_ABC_coeffs', 'Watson_coeffs',
+                         'interp1d_extrapolators', 'prop_cached',
+                         'TP_cached', 'tabular_data_interpolators',
+                         'tabular_data_interpolators_P')
     def __hash__(self):
-        return hash_any_primitive([self.__class__, self.__dict__])
+        d = self.__dict__
+        # extrapolation values and interpolation objects should be ignored
+        temp_store = {}
+        for k in self.hash_ignore_props:
+            try:
+                temp_store[k] = d[k]
+                del d[k]
+            except:
+                pass
+
+        ans = hash_any_primitive((self.__class__, d))
+        d.update(temp_store)
+
+        return ans
 
     def __repr__(self):
         clsname = self.__class__.__name__
         base = '%s(' % (clsname)
         if self.CASRN:
             base += 'CASRN="%s", ' %(self.CASRN)
-        for k, v in self.kwargs.items():
-            base += '%s=%s, ' %(k, v)
+        for k in self.custom_args:
+            v = getattr(self, k)
+            if v is not None:
+                base += '%s=%s, ' %(k, v)
         base += 'extrapolation="%s", ' %(self.extrapolation)
         base += 'method="%s", ' %(self.method)
         if hasattr(self, 'poly_fit_Tmin') and self.poly_fit_Tmin is not None:
@@ -864,6 +961,120 @@ class TDependentProperty(object):
             self.prop_cached = self.T_dependent_property(T)
             self.T_cached = T
             return self.prop_cached
+
+    def as_JSON(self):
+        r'''Method to create a JSON serialization of the property model
+        which can be stored, and reloaded later.
+
+        Returns
+        -------
+        json_repr : str
+            Json representation, [-]
+
+        Notes
+        -----
+
+        Examples
+        --------
+        '''
+        # vaguely jsonpickle compatible
+        mod_name = self.__class__.__module__
+        d = self.__dict__
+        d["py/object"] = "%s.%s" %(mod_name, self.__class__.__name__)
+        d["json_version"] = 1
+
+        all_methods_list = list(d['all_methods'])
+        all_methods_set = d['all_methods']
+        d['all_methods'] = all_methods_list
+        tabular_data_interpolators = d['tabular_data_interpolators']
+        d['tabular_data_interpolators'] = {}
+
+        if hasattr(self, 'all_methods_P'):
+            all_methods_P_list = list(d['all_methods_P'])
+            all_methods_P_set = d['all_methods_P']
+            d['all_methods_P'] = all_methods_P_list
+            tabular_data_interpolators_P = d['tabular_data_interpolators_P']
+            d['tabular_data_interpolators_P'] = {}
+
+        prop_references = []
+        for name in self.pure_references:
+            prop_obj = getattr(self, name)
+            prop_references.append(prop_obj)
+            if prop_obj is not None and type(prop_obj) not in (float, int):
+                d[name] = prop_obj.as_JSON()
+
+        CP_f = None
+        if hasattr(self, 'CP_f'):
+            CP_f = self.CP_f
+            d['CP_f'] = CP_f.CAS
+        if not json_loaded:
+            _load_json()
+        #print(self.__dict__)
+        ans = json.dumps(d)
+
+        # Set the dictionary back
+        del d["py/object"]
+        del d["json_version"]
+        d['all_methods'] = all_methods_set
+        if hasattr(self, 'all_methods_P'):
+            d['all_methods_P'] = all_methods_P_set
+            d['tabular_data_interpolators_P'] = tabular_data_interpolators_P
+        if CP_f is not None:
+            d['CP_f'] = CP_f
+        for name, obj in zip(self.pure_references, prop_references):
+            d[name] = obj
+
+        d['tabular_data_interpolators'] = tabular_data_interpolators
+
+        return ans
+
+    @classmethod
+    def from_JSON(cls, json_repr):
+        r'''Method to create a property model from a JSON
+        serialization of another property model.
+
+        Parameters
+        ----------
+        json_repr : str
+            JSON representation, [-]
+
+        Returns
+        -------
+        model : :obj:`TDependentProperty` or :obj:`TPDependentProperty`
+            Newly created object from the json serialization, [-]
+
+        Notes
+        -----
+        It is important that the input string be in the same format as that
+        created by :obj:`TDependentProperty.as_JSON`.
+
+        Examples
+        --------
+        '''
+        if not json_loaded:
+            _load_json()
+        d = json.loads(json_repr)
+        if 'CP_f' in d:
+            from thermo.coolprop import coolprop_fluids
+            d['CP_f'] = coolprop_fluids[d['CP_f']]
+
+        d['all_methods'] = set(d['all_methods'])
+        if 'all_methods_P' in d:
+            d['all_methods_P'] = set(d['all_methods_P'])
+
+        T_limits = d['T_limits']
+        for k, v in T_limits.items():
+            T_limits[k] = tuple(v)
+        tabular_data = d['tabular_data']
+        for k, v in tabular_data.items():
+            tabular_data[k] = tuple(v)
+
+
+        del d['py/object']
+        del d["json_version"]
+        new = cls.__new__(cls)
+        new.__dict__ = d
+        return new
 
     def _set_common_attributes(self):
 
@@ -1482,8 +1693,9 @@ class TDependentProperty(object):
         r'''Method to set tabular data to be used for interpolation.
         Ts must be in increasing order. If no name is given, data will be
         assigned the name 'Tabular data series #x', where x is the number of
-        previously added tabular data series. The name is added to all
-        methods and iserted at the start of user methods,
+        previously added tabular data series.
+
+        After adding the data, this method becomes the selected method.
 
         Parameters
         ----------
@@ -1540,7 +1752,6 @@ class TDependentProperty(object):
 
         def error(T):
             err = self.T_dependent_property(T) - goal
-            print(err, T)
             return err
         T_limits = self.T_limits[self.method]
         if self.extrapolation is None:
@@ -1812,7 +2023,7 @@ class TDependentProperty(object):
                     d_high = self._calculate_derivative_transformed(T=Tmax, method=method, order=1)
                 except:
                     v_high, d_high = None, None
-                linear_extrapolation_coeffs[method] = (v_low, d_low, v_high, d_high)
+                linear_extrapolation_coeffs[method] = [v_low, d_low, v_high, d_high]
             elif extrapolation == 'AntoineAB':
                 try:
                     Antoine_AB_coeffs = self.Antoine_AB_coeffs
@@ -1833,7 +2044,7 @@ class TDependentProperty(object):
                     AB_high = Antoine_AB_coeffs_from_point(T=Tmax, Psat=v_high, dPsat_dT=d_high, base=e)
                 except:
                     AB_high = None
-                Antoine_AB_coeffs[method] = (AB_low, AB_high)
+                Antoine_AB_coeffs[method] = [AB_low, AB_high]
             elif extrapolation == 'DIPPR101_ABC':
                 try:
                     DIPPR101_ABC_coeffs = self.DIPPR101_ABC_coeffs
@@ -1856,7 +2067,7 @@ class TDependentProperty(object):
                     DIPPR101_ABC_high = DIPPR101_ABC_coeffs_from_point(Tmax, v_high, d0_high, d1_high)
                 except:
                     DIPPR101_ABC_high = None
-                DIPPR101_ABC_coeffs[method] = (DIPPR101_ABC_low, DIPPR101_ABC_high)
+                DIPPR101_ABC_coeffs[method] = [DIPPR101_ABC_low, DIPPR101_ABC_high]
             elif extrapolation == 'Watson':
                 try:
                     Watson_coeffs = self.Watson_coeffs
@@ -1878,7 +2089,7 @@ class TDependentProperty(object):
                     n_high = Watson_n(Tmax, Tmax-delta, v0_high, v1_high, self.Tc)
                 except:
                     v0_high, v1_high, n_high = None, None, None
-                Watson_coeffs[method] = (v0_low, n_low, v0_high, n_high)
+                Watson_coeffs[method] = [v0_low, n_low, v0_high, n_high]
             elif extrapolation == 'interp1d':
                 from scipy.interpolate import interp1d
                 try:
@@ -2154,10 +2365,54 @@ class TDependentProperty(object):
 
 class TPDependentProperty(TDependentProperty):
     '''Class for calculating temperature and pressure dependent chemical
-    properties.'''
+    properties.
+
+    On creation, a :obj:`TPDependentProperty` examines all the possible methods
+    implemented for calculating the property, loads whichever coefficients it
+    needs (unless `load_data` is set to False), examines its input parameters,
+    and selects the method it prefers. This method will continue to be used for
+    all calculations until the method is changed by setting a new method
+    to the to :obj:`method` attribute.
+
+    Because many pressure dependent property methods are implemented as a
+    low-pressure correlation and a high-pressure correlation, this class
+    works essentially the same as :obj:`TDependentProperty` but with extra
+    methods that accept pressure as a parameter.
+
+    The object also selects the pressure-dependent method it prefers.
+    This method will continue to be used for all pressure-dependent
+    calculations until the pressure-dependent method is changed by setting a
+    new method_P to the to :obj:`method_P` attribute.
+
+    The default list of preferred pressure-dependent method orderings is at
+    :obj:`ranked_methods_P`
+    for all properties; the order can be modified there in-place, and this
+    will take effect on all new :obj:`TPDependentProperty` instances created
+    but NOT on existing instances.
+
+    Tabular data can be provided as either temperature-dependent or
+    pressure-dependent data. The same `extrapolation` settings as in
+    :obj:`TDependentProperty` are implemented here for the low-pressure
+    correlations.
+
+    In addition to the methods and attributes shown here, all those from
+    :obj:`TPDependentProperty` are also available.
+
+    Attributes
+    ----------
+    method_P : str
+        The method was which was last used successfully to calculate a property;
+        set only after the first property calculation.
+    method : str
+        The method to be used for property calculations, [-]
+    '''
     interpolation_P = None
-    forced_P = False
-    TP_cached = None
+    TP_cached = (None, None)
+    '''Previously specified `T` and `P` in the calculation.'''
+
+    all_methods_P = set()
+    '''Set of all pressure-dependent methods loaded and ready to use for the
+    chemical property.'''
 
     @property
     def method_P(self):
@@ -2182,9 +2437,9 @@ class TPDependentProperty(TDependentProperty):
 
     def __call__(self, T, P):
         r'''Convenience method to calculate the property; calls
-        :obj::obj:`TP_dependent_property <thermo.utils.TPDependentProperty.TP_dependent_property>`. Caches previously calculated value,
+        :obj:`TP_dependent_property <thermo.utils.TPDependentProperty.TP_dependent_property>`. Caches previously calculated value,
         which is an overhead when calculating many different values of
-        a property. See :obj::obj:`TP_dependent_property <thermo.utils.TPDependentProperty.TP_dependent_property>` for more details as to the
+        a property. See :obj:`TP_dependent_property <thermo.utils.TPDependentProperty.TP_dependent_property>` for more details as to the
         calculation procedure.
 
         Parameters
@@ -2202,16 +2457,24 @@ class TPDependentProperty(TDependentProperty):
         if (T, P) == self.TP_cached:
             return self.prop_cached
         else:
-            self.prop_cached = self.TP_or_T_dependent_property(T, P)
+            if P is not None:
+                self.prop_cached = self.TP_dependent_property(T, P)
+            else:
+                self.prop_cached = self.T_dependent_property(T)
             self.TP_cached = (T, P)
             return self.prop_cached
 
-    def select_valid_methods_P(self, T, P, check_validity=True):
-        r'''Method to obtain a sorted list methods which are valid at `T`
-        according to :obj:`test_method_validity`. Considers either only user methods
-        if forced is True, or all methods. User methods are first tested
-        according to their listed order, and unless forced is True, then all
-        methods are tested and sorted by their order in :obj:`ranked_methods`.
+    def valid_methods_P(self, T=None, P=None):
+        r'''Method to obtain a sorted list of high-pressure methods that have
+        data available to be used. The methods are ranked in the following
+        order:
+
+        * The currently selected :obj:`method_P` is first (if one is selected)
+        * Other available pressure-depenent methods are ranked by the attribute
+          :obj:`ranked_methods_P`
+
+        If `T` and `P` are provided, the methods will be checked against the
+        temperature and pressure limits of the correlations as well.
 
         Parameters
         ----------
@@ -2219,57 +2482,41 @@ class TPDependentProperty(TDependentProperty):
             Temperature at which to test methods, [K]
         P : float
             Pressure at which to test methods, [Pa]
-        check_validity : bool
-            Whether or not to use :obj:`test_method_validity` to check the
-            method for validity or not, [-]
 
         Returns
         -------
         sorted_valid_methods_P : list
             Sorted lists of methods valid at T and P according to
-            :obj:`test_method_validity`
+            :obj:`test_method_validity_P`
         '''
-        # Same as valid_methods but with _P added to variables
-        if self.forced_P:
-            considered_methods = list(self.user_methods_P)
-        else:
-            considered_methods = list(self.all_methods_P)
+        considered_methods = list(self.all_methods_P)
 
-        if self.user_methods_P:
-            [considered_methods.remove(i) for i in self.user_methods_P]
+        if self._method_P is not None:
+            considered_methods.remove(self._method_P)
 
         preferences = sorted([self.ranked_methods_P.index(i) for i in considered_methods])
         sorted_methods = [self.ranked_methods_P[i] for i in preferences]
 
-        if self.user_methods_P:
-            [sorted_methods.insert(0, i) for i in reversed(self.user_methods_P)]
+        if self._method_P is not None:
+            sorted_methods.insert(0, self._method_P)
 
-        if not check_validity:
+        if T is not None and P is not None:
+            sorted_valid_methods_P = []
+            for method in sorted_methods:
+                if self.test_method_validity_P(T, P, method):
+                    sorted_valid_methods_P.append(method)
+            return sorted_valid_methods_P
+        else:
             return sorted_methods
 
-        sorted_valid_methods_P = []
-        for method in sorted_methods:
-            if self.test_method_validity_P(T, P, method):
-                sorted_valid_methods_P.append(method)
-
-        return sorted_valid_methods_P
 
     def TP_dependent_property(self, T, P):
-        r'''Method to calculate the property with sanity checking and without
-        specifying a specific method. :obj:`select_valid_methods_P` is used to obtain
-        a sorted list of methods to try. Methods are then tried in order until
-        one succeeds. The methods are allowed to fail, and their results are
-        checked with :obj:`test_property_validity`. On success, the used method
-        is stored in the variable :obj:`method_P`.
+        r'''Method to calculate the property given a temperature and pressure
+        according to the selected :obj:`method_P` and :obj:`method`.
+        The pressure-dependent method is always used and required to succeed.
+        The result is checked with :obj:`test_property_validity`.
 
-        If :obj:`method_P` is set, this method is first checked for validity with
-        :obj:`test_method_validity_P` for the specified temperature, and if it is
-        valid, it is then used to calculate the property. The result is checked
-        for validity, and returned if it is valid. If either of the checks fail,
-        the function retrieves a full list of valid methods with
-        :obj:`select_valid_methods_P` and attempts them as described above.
-
-        If no methods are found which succeed, returns None.
+        If the method does not succeed, returns None.
 
         Parameters
         ----------
@@ -2283,21 +2530,6 @@ class TPDependentProperty(TDependentProperty):
         prop : float
             Calculated property, [`units`]
         '''
-        # Optimistic track, with the already set method
-#        if self.method_P:
-#            # retest within range
-#            if self.test_method_validity_P(T, P, self.method_P):
-#                try:
-#                    prop = self.calculate_P(T, P, self.method_P)
-#                    if self.test_property_validity(prop):
-#                        return prop
-#                except:  # pragma: no cover
-#                    pass
-#
-        # get valid methods at T, and try them until one yields a valid
-        # property; store the method_P and return the answer
-#        self.sorted_valid_methods_P = self.select_valid_methods_P(T, P)
-#        for method_P in self.sorted_valid_methods_P:
         try:
             prop = self.calculate_P(T, P, self._method_P)
             if self.test_property_validity(prop):
@@ -2308,8 +2540,32 @@ class TPDependentProperty(TDependentProperty):
         return None
 
     def TP_or_T_dependent_property(self, T, P):
-#        self.method = None
-#        self.method_P = None
+        r'''Method to calculate the property given a temperature and pressure
+        according to the selected :obj:`method_P` and :obj:`method`.
+        The pressure-dependent method is always tried.
+        The result is checked with :obj:`test_property_validity`.
+
+        If the pressure-dependent method does not succeed, the low-pressure
+        method is tried and its result is returned.
+
+        .. warning::
+            It can seem like a good idea to switch between a low-pressure and
+            a high-pressure method if the high pressure method is not working,
+            however it can cause discontinuities and prevent numerical methods
+            from converging
+
+        Parameters
+        ----------
+        T : float
+            Temperature at which to calculate the property, [K]
+        P : float
+            Pressure at which to calculate the property, [Pa]
+
+        Returns
+        -------
+        prop : float
+            Calculated property, [`units`]
+        '''
         if P is not None:
             prop = self.TP_dependent_property(T, P)
         if P is None or prop is None:
@@ -2321,8 +2577,11 @@ class TPDependentProperty(TDependentProperty):
         r'''Method to set tabular data to be used for interpolation.
         Ts and Psmust be in increasing order. If no name is given, data will be
         assigned the name 'Tabular data series #x', where x is the number of
-        previously added tabular data series. The name is added to all
-        methods and is inserted at the start of user methods,
+        previously added tabular data series.
+
+        After adding the data, this method becomes the selected high-pressure
+        method.
+
 
         Parameters
         ----------
@@ -2331,7 +2590,8 @@ class TPDependentProperty(TDependentProperty):
         Ps : array-like
             Increasing array of pressures at which properties are specified, [Pa]
         properties : array-like
-            List of properties at Ts, [`units`]
+            List of properties at `Ts` and `Ps`; the data should be indexed
+            [P][T], [`units`]
         name : str, optional
             Name assigned to the data
         check_properties : bool
@@ -2431,7 +2691,7 @@ class TPDependentProperty(TDependentProperty):
         if self.interpolation_T:
             T = self.interpolation_T(T)
         if self.interpolation_P:
-            P = self.interpolation_T(P)
+            P = self.interpolation_P(P)
         prop = tool(T, P)  # either spline, or linear interpolation
 
         if self.interpolation_property:
@@ -2489,10 +2749,7 @@ class TPDependentProperty(TDependentProperty):
         fig = plt.figure()
 
         if not methods_P:
-            if self.user_methods_P:
-                methods_P = self.user_methods_P
-            else:
-                methods_P = self.all_methods_P
+            methods_P = self.all_methods_P
         Ps = linspace(Pmin, Pmax, pts)
         for method_P in methods_P:
             if only_valid:
@@ -2567,11 +2824,10 @@ class TPDependentProperty(TDependentProperty):
         if hasattr(P, '__call__'):
             P_changes = True
             P_func = P
+        else:
+            P_changes = False
         if not methods_P:
-            if self.user_methods_P:
-                methods_P = self.user_methods_P
-            else:
-                methods_P = self.all_methods_P
+            methods_P = self.all_methods_P
         Ts = linspace(Tmin, Tmax, pts)
         fig = plt.figure()
         for method_P in methods_P:
@@ -2631,7 +2887,7 @@ class TPDependentProperty(TDependentProperty):
         Pmax : float
             Maximum pressure, to stop calculating the property, [Pa]
         methods_P : list, optional
-            List of methods to consider
+            List of methods to plot
         pts : int, optional
             A list of points to calculate the property at for both temperature
             and pressure; pts^2 points will be calculated.
@@ -2645,6 +2901,7 @@ class TPDependentProperty(TDependentProperty):
         from mpl_toolkits.mplot3d import axes3d
         from matplotlib.ticker import FormatStrFormatter
         import numpy.ma as ma
+        import matplotlib.pyplot as plt
 
         if Pmin is None:
             if self.Pmin is not None:
@@ -2697,7 +2954,7 @@ class TPDependentProperty(TDependentProperty):
                 properties = ma.masked_invalid(np.array(properties, dtype=np.float).T)
                 handles.append(ax.plot_surface(Ts_mesh, Ps_mesh, properties, cstride=1, rstride=1, alpha=0.5))
             else:
-                properties = [[self.calculate_P(T, P, method_P) for P in Ps] for T in Ts]
+                properties = np.array([[self.calculate_P(T, P, method_P) for T in Ts] for P in Ps])
                 handles.append(ax.plot_surface(Ts_mesh, Ps_mesh, properties, cstride=1, rstride=1, alpha=0.5))
 
         ax.yaxis.set_major_formatter(FormatStrFormatter('%.4g'))
@@ -2739,7 +2996,7 @@ class TPDependentProperty(TDependentProperty):
 
         Returns
         -------
-        d_prop_d_T_at_P : float
+        dprop_dT_P : float
             Calculated derivative property at constant pressure,
             [`units/K^order`]
         '''
@@ -2771,7 +3028,7 @@ class TPDependentProperty(TDependentProperty):
 
         Returns
         -------
-        d_prop_d_P_at_T : float
+        dprop_dP_T : float
             Calculated derivative property at constant temperature,
             [`units/Pa^order`]
         '''
@@ -2781,9 +3038,7 @@ class TPDependentProperty(TDependentProperty):
     def TP_dependent_property_derivative_T(self, T, P, order=1):
         r'''Method to calculate a derivative of a temperature and pressure
         dependent property with respect to temperature at constant pressure,
-        of a given order. Methods found valid by :obj:`select_valid_methods_P` are
-        attempted until a method succeeds. If no methods are valid and succeed,
-        None is returned.
+        of a given order, according to the selected :obj:`method_P`.
 
         Calls :obj:`calculate_derivative_T` internally to perform the actual
         calculation.
@@ -2802,23 +3057,19 @@ class TPDependentProperty(TDependentProperty):
 
         Returns
         -------
-        d_prop_d_T_at_P : float
+        dprop_dT_P : float
             Calculated derivative property, [`units/K^order`]
         '''
-        sorted_valid_methods_P = self.select_valid_methods_P(T, P)
-        for method in sorted_valid_methods_P:
-            try:
-                return self.calculate_derivative_T(T, P, method, order)
-            except:
-                pass
+        try:
+            return self.calculate_derivative_T(T, P, self._method_P, order)
+        except:
+            pass
         return None
 
     def TP_dependent_property_derivative_P(self, T, P, order=1):
         r'''Method to calculate a derivative of a temperature and pressure
         dependent property with respect to pressure at constant temperature,
-        of a given order. Methods found valid by :obj:`select_valid_methods_P` are
-        attempted until a method succeeds. If no methods are valid and succeed,
-        None is returned.
+        of a given order, according to the selected :obj:`method_P`.
 
         Calls :obj:`calculate_derivative_P` internally to perform the actual
         calculation.
@@ -2837,15 +3088,13 @@ class TPDependentProperty(TDependentProperty):
 
         Returns
         -------
-        d_prop_d_P_at_T : float
+        dprop_dP_T : float
             Calculated derivative property, [`units/Pa^order`]
         '''
-        sorted_valid_methods_P = self.select_valid_methods_P(T, P)
-        for method in sorted_valid_methods_P:
-            try:
-                return self.calculate_derivative_P(P, T, method, order)
-            except:
-                pass
+        try:
+            return self.calculate_derivative_P(P, T, self._method_P, order)
+        except:
+            pass
         return None
 
 
@@ -2860,6 +3109,9 @@ class MixtureProperty(object):
     prop_cached = None
     _correct_pressure_pure = True
     _method = None
+
+    pure_references = ()
+    pure_reference_types = ()
 
     skip_prop_validity_check = False
     '''Flag to disable checking the output of the value. Saves a little time.
@@ -2881,6 +3133,94 @@ class MixtureProperty(object):
                                [i.poly_fit_Tmax_value for i in pure_objs],
                                [i.poly_fit_coeffs for i in pure_objs]]
 
+    def __eq__(self, other):
+        return self.__hash__() == other.__hash__()
+
+    def __hash__(self):
+        d = self.__dict__
+        ans = hash_any_primitive((self.__class__, d))
+        return ans
+
+    def as_JSON(self):
+        r'''Method to create a JSON serialization of the mixture property
+        which can be stored, and reloaded later.
+
+        Returns
+        -------
+        json_repr : str
+            Json representation, [-]
+
+        Notes
+        -----
+
+        Examples
+        --------
+        '''
+        if not json_loaded:
+            _load_json()
+
+        d = self.__dict__ # Not a the real object dictionary
+        mod_name = self.__class__.__module__
+        pure_references = [d[k] for k in self.pure_references]
+        for i, k in enumerate(self.pure_references):
+            d[k] = [v.as_JSON() for v in pure_references[i]]
+        del d['pure_objs']
+
+        d["py/object"] = "%s.%s" %(mod_name, self.__class__.__name__)
+        all_methods = d['all_methods']
+        d['all_methods'] = list(all_methods)
+
+
+        d['json_version'] = 1
+        ans = json.dumps(d)
+        del d['json_version']
+        del d["py/object"]
+        for i, k in enumerate(self.pure_references):
+            d[k] = pure_references[i]
+        # First reference must be the common one
+        d['pure_objs'] = pure_references[0]
+        d['all_methods'] = all_methods
+        return ans
+
+    @classmethod
+    def from_JSON(cls, string):
+        r'''Method to create a MixtureProperty from a JSON
+        serialization of another MixtureProperty.
+
+        Parameters
+        ----------
+        json_repr : str
+            Json representation, [-]
+
+        Returns
+        -------
+        constants : :obj:`MixtureProperty`
+            Newly created object from the json serialization, [-]
+
+        Notes
+        -----
+        It is important that the input string be in the same format as that
+        created by :obj:`MixtureProperty.as_JSON`.
+
+        Examples
+        --------
+        '''
+        if json is None:
+            get_json()
+        d = json.loads(string)
+        d['all_methods'] = set(d['all_methods'])
+        for k, sub_cls in zip(cls.pure_references, cls.pure_reference_types):
+            sub_jsons = d[k]
+            d[k] = [sub_cls.from_JSON(j) for j in sub_jsons]
+
+        d['pure_objs'] = d[cls.pure_references[0]]
+
+        del d['py/object']
+        del d["json_version"]
+        new = cls.__new__(cls)
+        new.__dict__ = d
+        return new
+
     @property
     def method(self):
         r'''Method to set the T, P, and composition dependent property method
@@ -2892,7 +3232,7 @@ class MixtureProperty(object):
     @method.setter
     def method(self, method):
         self._method = method
-        self.TP_zs_ws_cached = (None, None, None, None)
+        self.TP_zs_ws_cached = [None, None, None, None]
 
     @property
     def correct_pressure_pure(self):
@@ -2906,7 +3246,7 @@ class MixtureProperty(object):
     def correct_pressure_pure(self, v):
         if v != self._correct_pressure_pure:
             self._correct_pressure_pure = v
-            self.TP_zs_ws_cached = (None, None, None, None)
+            self.TP_zs_ws_cached = [None, None, None, None]
 
     def _complete_zs_ws(self, zs, ws):
         if zs is None and ws is None:
@@ -2919,9 +3259,9 @@ class MixtureProperty(object):
 
     def __call__(self, T, P, zs=None, ws=None):
         r'''Convenience method to calculate the property; calls
-        :obj::obj:`mixture_property <thermo.utils.MixtureProperty.mixture_property>`. Caches previously calculated value,
+        :obj:`mixture_property <thermo.utils.MixtureProperty.mixture_property>`. Caches previously calculated value,
         which is an overhead when calculating many different values of
-        a property. See :obj::obj:`mixture_property <thermo.utils.MixtureProperty.mixture_property>` for more details as to the
+        a property. See :obj:`mixture_property <thermo.utils.MixtureProperty.mixture_property>` for more details as to the
         calculation procedure. One or both of `zs` and `ws` are required.
 
         Parameters
@@ -2946,7 +3286,7 @@ class MixtureProperty(object):
             return self.prop_cached
         else:
             self.prop_cached = self.mixture_property(T, P, zs, ws)
-            self.TP_zs_ws_cached = (T, P, zs, ws)
+            self.TP_zs_ws_cached = [T, P, zs, ws]
             return self.prop_cached
 
     @classmethod

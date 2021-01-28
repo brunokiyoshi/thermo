@@ -46,9 +46,112 @@ UNIQUAC Functional Calculations
 from __future__ import division
 from math import log, exp
 from fluids.constants import R
-from thermo.activity import GibbsExcess
+from thermo.activity import GibbsExcess, interaction_exp, dinteraction_exp_dT, d2interaction_exp_dT2, d3interaction_exp_dT3
 
 __all__ = ['UNIQUAC', 'UNIQUAC_gammas']
+
+def uniquac_phis(N, xs, rs, phis=None):
+    if phis is None:
+        phis = [0.0]*N
+
+    rsxs_sum_inv = 0.0
+    for i in range(N):
+        phis[i] = rs[i]*xs[i]
+        rsxs_sum_inv += phis[i]
+    rsxs_sum_inv = 1.0/rsxs_sum_inv
+    for i in range(N):
+        phis[i] *= rsxs_sum_inv
+    return phis, rsxs_sum_inv
+
+def uniquac_dphis_dxs(N, rs, phis, rsxs_sum_inv, dphis_dxs=None, vec0=None):
+    if dphis_dxs is None:
+        dphis_dxs = [[0.0]*N for i in range(N)] # numba: delete
+#        dphis_dxs = zeros((N, N)) # numba: uncomment
+    if vec0 is None:
+        vec0 = [0.0]*N
+
+    rsxs_sum_inv_m = -rsxs_sum_inv
+    for i in range(N):
+        vec0[i] = phis[i]*rsxs_sum_inv_m
+
+    for j in range(N):
+        for i in range(N):
+            dphis_dxs[i][j] = vec0[i]*rs[j]
+        # There is no symmetry to exploit here
+        dphis_dxs[j][j] += rs[j]*rsxs_sum_inv
+
+    return dphis_dxs
+
+def uniquac_thetaj_taus_jis(N, taus, thetas, thetaj_taus_jis=None):
+    if thetaj_taus_jis is None:
+        thetaj_taus_jis = [0.0]*N
+
+    for i in range(N):
+        tot = 0.0
+        for j in range(N):
+            tot += thetas[j]*taus[j][i]
+        thetaj_taus_jis[i] = tot
+    return thetaj_taus_jis
+
+def uniquac_thetaj_taus_ijs(N, taus, thetas, thetaj_taus_ijs=None):
+    if thetaj_taus_ijs is None:
+        thetaj_taus_ijs = [0.0]*N
+
+    for i in range(N):
+        tot = 0.0
+        for j in range(N):
+            tot += thetas[j]*taus[i][j]
+        thetaj_taus_ijs[i] = tot
+    return thetaj_taus_ijs
+
+def uniquac_GE(T, N, z, xs, qs, phis, thetas, thetaj_taus_jis):
+
+    gE = 0.0
+    z_2 = 0.5*z
+    for i in range(N):
+        gE += xs[i]*log(phis[i]/xs[i])
+        gE += z_2*qs[i]*xs[i]*log(thetas[i]/phis[i])
+        gE -= qs[i]*xs[i]*log(thetaj_taus_jis[i])
+
+    gE *= R*T
+    return gE
+
+def uniquac_dGE_dT(T, N, GE, xs, qs, thetaj_taus_jis, thetaj_dtaus_dT_jis):
+    dGE = GE/T
+    tot = 0.0
+    for i in range(N):
+        tot -= qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]/thetaj_taus_jis[i]
+    dGE += R*T*tot
+    return dGE
+
+
+def uniquac_d2GE_dT2(T, N, GE, dGE_dT, xs, qs, thetaj_taus_jis, thetaj_dtaus_dT_jis, thetaj_d2taus_dT2_jis):
+    tot = 0.0
+    for i in range(N):
+        tot += qs[i]*xs[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]
+        tot -= qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**2/thetaj_taus_jis[i]**2
+    d2GE_dT2 = T*tot - 2.0/(R*T)*(dGE_dT - GE/T)
+    d2GE_dT2 *= -R
+    return d2GE_dT2
+
+def uniquac_d3GE_dT3(T, N, xs, qs, thetaj_taus_jis,
+                     thetaj_dtaus_dT_jis, thetaj_d2taus_dT2_jis,
+                     thetaj_d3taus_dT3_jis):
+    Ttot, tot = 0.0, 0.0
+
+    for i in range(N):
+        Ttot += qs[i]*xs[i]*thetaj_d3taus_dT3_jis[i]/thetaj_taus_jis[i]
+        Ttot -= 3.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]**2
+        Ttot += 2.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**3/thetaj_taus_jis[i]**3
+
+        tot += 3.0*qs[i]*xs[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]
+        tot -= 3.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**2/thetaj_taus_jis[i]**2
+
+    d3GE_dT3 = -R*(T*Ttot + tot)
+    return d3GE_dT3
+
+
+
 
 class UNIQUAC(GibbsExcess):
     r'''Class for representing an a liquid with excess gibbs energy represented
@@ -175,6 +278,7 @@ class UNIQUAC(GibbsExcess):
                  ABCDEF=None):
         self.T = T
         self.xs = xs
+        self.scalar = scalar = type(xs) is list
         self.rs = rs
         self.qs = qs
 
@@ -200,7 +304,6 @@ class UNIQUAC(GibbsExcess):
                 self.tau_coeffs_F = None
 
             self.N = N = len(self.tau_coeffs_A)
-        self.cmps = range(N)
         self.zero_coeffs = [[0.0]*N for _ in range(N)]
 
     def to_T_xs(self, T, xs):
@@ -229,10 +332,10 @@ class UNIQUAC(GibbsExcess):
         new = self.__class__.__new__(self.__class__)
         new.T = T
         new.xs = xs
+        new.scalar = self.scalar
         new.rs = self.rs
         new.qs = self.qs
         new.N = self.N
-        new.cmps = self.cmps
         new.zero_coeffs = self.zero_coeffs
 
         (new.tau_coeffs_A, new.tau_coeffs_B, new.tau_coeffs_C,
@@ -280,33 +383,33 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             pass
         # 87% of the time of this routine is the exponential.
-        tau_coeffs_A = self.tau_coeffs_A
-        tau_coeffs_B = self.tau_coeffs_B
-        tau_coeffs_C = self.tau_coeffs_C
-        tau_coeffs_D = self.tau_coeffs_D
-        tau_coeffs_E = self.tau_coeffs_E
-        tau_coeffs_F = self.tau_coeffs_F
+        A = self.tau_coeffs_A
+        B = self.tau_coeffs_B
+        C = self.tau_coeffs_C
+        D = self.tau_coeffs_D
+        E = self.tau_coeffs_E
+        F = self.tau_coeffs_F
         T = self.T
-        cmps = self.cmps
+        N = self.N
 
-        T2 = T*T
-        Tinv = 1.0/T
-        T2inv = Tinv*Tinv
-        logT = log(T)
+#        T2 = T*T
+#        Tinv = 1.0/T
+#        T2inv = Tinv*Tinv
+#        logT = log(T)
 
-        self._taus = taus = []
-        for i in cmps:
-            tau_coeffs_Ai = tau_coeffs_A[i]
-            tau_coeffs_Bi = tau_coeffs_B[i]
-            tau_coeffs_Ci = tau_coeffs_C[i]
-            tau_coeffs_Di = tau_coeffs_D[i]
-            tau_coeffs_Ei = tau_coeffs_E[i]
-            tau_coeffs_Fi = tau_coeffs_F[i]
-            tausi = [exp(tau_coeffs_Ai[j] + tau_coeffs_Bi[j]*Tinv
-                        + tau_coeffs_Ci[j]*logT + tau_coeffs_Di[j]*T
-                        + tau_coeffs_Ei[j]*T2inv + tau_coeffs_Fi[j]*T2)
-                        for j in cmps]
-            taus.append(tausi)
+        self._taus = taus = interaction_exp(T, N, A, B, C, D, E, F)
+#        for i in range(N):
+#            tau_coeffs_Ai = tau_coeffs_A[i]
+#            tau_coeffs_Bi = tau_coeffs_B[i]
+#            tau_coeffs_Ci = tau_coeffs_C[i]
+#            tau_coeffs_Di = tau_coeffs_D[i]
+#            tau_coeffs_Ei = tau_coeffs_E[i]
+#            tau_coeffs_Fi = tau_coeffs_F[i]
+#            tausi = [exp(tau_coeffs_Ai[j] + tau_coeffs_Bi[j]*Tinv
+#                        + tau_coeffs_Ci[j]*logT + tau_coeffs_Di[j]*T
+#                        + tau_coeffs_Ei[j]*T2inv + tau_coeffs_Fi[j]*T2)
+#                        for j in range(N)]
+#            taus.append(tausi)
 
         return taus
 
@@ -335,36 +438,36 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             pass
 
-        tau_coeffs_B = self.tau_coeffs_B
-        tau_coeffs_C = self.tau_coeffs_C
-        tau_coeffs_D = self.tau_coeffs_D
-        tau_coeffs_E = self.tau_coeffs_E
-        tau_coeffs_F = self.tau_coeffs_F
+        B = self.tau_coeffs_B
+        C = self.tau_coeffs_C
+        D = self.tau_coeffs_D
+        E = self.tau_coeffs_E
+        F = self.tau_coeffs_F
 
-        T, cmps = self.T, self.cmps
+        T, N = self.T, self.N
         try:
             taus = self._taus
         except AttributeError:
             taus = self.taus()
-        self._dtaus_dT = dtaus_dT = []
-
-        T2 = T + T
-        Tinv = 1.0/T
-        nT2inv = -Tinv*Tinv
-        nT3inv2 = 2.0*nT2inv*Tinv
-
-        for i in cmps:
-            tausi = taus[i]
-            tau_coeffs_Bi = tau_coeffs_B[i]
-            tau_coeffs_Ci = tau_coeffs_C[i]
-            tau_coeffs_Di = tau_coeffs_D[i]
-            tau_coeffs_Ei = tau_coeffs_E[i]
-            tau_coeffs_Fi = tau_coeffs_F[i]
-            dtaus_dTi = [(T2*tau_coeffs_Fi[j] + tau_coeffs_Di[j]
-                             + tau_coeffs_Ci[j]*Tinv + tau_coeffs_Bi[j]*nT2inv
-                             + tau_coeffs_Ei[j]*nT3inv2)*tausi[j]
-                            for j in cmps]
-            dtaus_dT.append(dtaus_dTi)
+        self._dtaus_dT = dtaus_dT = dinteraction_exp_dT(T, N, B, C, D, E, F, taus)
+#
+#        T2 = T + T
+#        Tinv = 1.0/T
+#        nT2inv = -Tinv*Tinv
+#        nT3inv2 = 2.0*nT2inv*Tinv
+#
+#        for i in range(N):
+#            tausi = taus[i]
+#            tau_coeffs_Bi = tau_coeffs_B[i]
+#            tau_coeffs_Ci = tau_coeffs_C[i]
+#            tau_coeffs_Di = tau_coeffs_D[i]
+#            tau_coeffs_Ei = tau_coeffs_E[i]
+#            tau_coeffs_Fi = tau_coeffs_F[i]
+#            dtaus_dTi = [(T2*tau_coeffs_Fi[j] + tau_coeffs_Di[j]
+#                             + tau_coeffs_Ci[j]*Tinv + tau_coeffs_Bi[j]*nT2inv
+#                             + tau_coeffs_Ei[j]*nT3inv2)*tausi[j]
+#                            for j in range(N)]
+#            dtaus_dT.append(dtaus_dTi)
         return dtaus_dT
 
     def d2taus_dT2(self):
@@ -394,11 +497,11 @@ class UNIQUAC(GibbsExcess):
             return self._d2taus_dT2
         except AttributeError:
             pass
-        tau_coeffs_B = self.tau_coeffs_B
-        tau_coeffs_C = self.tau_coeffs_C
-        tau_coeffs_E = self.tau_coeffs_E
-        tau_coeffs_F = self.tau_coeffs_F
-        T, cmps = self.T, self.cmps
+        B = self.tau_coeffs_B
+        C = self.tau_coeffs_C
+        E = self.tau_coeffs_E
+        F = self.tau_coeffs_F
+        T, N = self.T, self.N
 
         try:
             taus = self._taus
@@ -408,25 +511,25 @@ class UNIQUAC(GibbsExcess):
             dtaus_dT = self._dtaus_dT
         except AttributeError:
             dtaus_dT = self.dtaus_dT()
+#
+#        Tinv = 1.0/T
+#        nT2inv = -Tinv*Tinv
+#        T3inv2 = -2.0*nT2inv*Tinv
+#        T4inv6 = 3.0*T3inv2*Tinv
 
-        Tinv = 1.0/T
-        nT2inv = -Tinv*Tinv
-        T3inv2 = -2.0*nT2inv*Tinv
-        T4inv6 = 3.0*T3inv2*Tinv
-
-        self._d2taus_dT2 = d2taus_dT2s = []
-        for i in cmps:
-            tausi = taus[i]
-            dtaus_dTi = dtaus_dT[i]
-            tau_coeffs_Bi = tau_coeffs_B[i]
-            tau_coeffs_Ci = tau_coeffs_C[i]
-            tau_coeffs_Ei = tau_coeffs_E[i]
-            tau_coeffs_Fi = tau_coeffs_F[i]
-            d2taus_dT2i = [(2.0*tau_coeffs_Fi[j] + nT2inv*tau_coeffs_Ci[j]
-                             + T3inv2*tau_coeffs_Bi[j] + T4inv6*tau_coeffs_Ei[j]
-                               )*tausi[j] + dtaus_dTi[j]*dtaus_dTi[j]/tausi[j]
-                             for j in cmps]
-            d2taus_dT2s.append(d2taus_dT2i)
+        self._d2taus_dT2 = d2taus_dT2s = d2interaction_exp_dT2(T, N, B, C, E, F, taus, dtaus_dT)
+#        for i in range(N):
+#            tausi = taus[i]
+#            dtaus_dTi = dtaus_dT[i]
+#            tau_coeffs_Bi = tau_coeffs_B[i]
+#            tau_coeffs_Ci = tau_coeffs_C[i]
+#            tau_coeffs_Ei = tau_coeffs_E[i]
+#            tau_coeffs_Fi = tau_coeffs_F[i]
+#            d2taus_dT2i = [(2.0*tau_coeffs_Fi[j] + nT2inv*tau_coeffs_Ci[j]
+#                             + T3inv2*tau_coeffs_Bi[j] + T4inv6*tau_coeffs_Ei[j]
+#                               )*tausi[j] + dtaus_dTi[j]*dtaus_dTi[j]/tausi[j]
+#                             for j in range(N)]
+#            d2taus_dT2s.append(d2taus_dT2i)
         return d2taus_dT2s
 
     def d3taus_dT3(self):
@@ -459,11 +562,11 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             pass
 
-        T, cmps = self.T, self.cmps
-        tau_coeffs_B = self.tau_coeffs_B
-        tau_coeffs_C = self.tau_coeffs_C
-        tau_coeffs_E = self.tau_coeffs_E
-        tau_coeffs_F = self.tau_coeffs_F
+        T, N = self.T, self.N
+        B = self.tau_coeffs_B
+        C = self.tau_coeffs_C
+        E = self.tau_coeffs_E
+        F = self.tau_coeffs_F
 
         try:
             taus = self._taus
@@ -474,36 +577,36 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             dtaus_dT = self.dtaus_dT()
 
-        Tinv = 1.0/T
-        Tinv3 = 3.0*Tinv
-        nT2inv = -Tinv*Tinv
-        nT2inv05 = 0.5*nT2inv
-        T3inv = -nT2inv*Tinv
-        T3inv2 = T3inv+T3inv
-        T4inv3 = 1.5*T3inv2*Tinv
-        T2_12 = -12.0*nT2inv
+#        Tinv = 1.0/T
+#        Tinv3 = 3.0*Tinv
+#        nT2inv = -Tinv*Tinv
+#        nT2inv05 = 0.5*nT2inv
+#        T3inv = -nT2inv*Tinv
+#        T3inv2 = T3inv+T3inv
+#        T4inv3 = 1.5*T3inv2*Tinv
+#        T2_12 = -12.0*nT2inv
 
-        self._d3taus_dT3 = d3taus_dT3s = []
-        for i in cmps:
-            tausi = taus[i]
-            dtaus_dTi = dtaus_dT[i]
-            tau_coeffs_Bi = tau_coeffs_B[i]
-            tau_coeffs_Ci = tau_coeffs_C[i]
-            tau_coeffs_Ei = tau_coeffs_E[i]
-            tau_coeffs_Fi = tau_coeffs_F[i]
-            d3taus_dT3is = []
-            for j in cmps:
-                term2 = (tau_coeffs_Fi[j] + nT2inv05*tau_coeffs_Ci[j]
-                         + T3inv*tau_coeffs_Bi[j] + T4inv3*tau_coeffs_Ei[j])
-
-                term3 = dtaus_dTi[j]/tausi[j]
-
-                term4 = (T3inv2*(tau_coeffs_Ci[j] - Tinv3*tau_coeffs_Bi[j]
-                         - T2_12*tau_coeffs_Ei[j]))
-
-                d3taus_dT3is.append((term3*(6.0*term2 + term3*term3) + term4)*tausi[j])
-
-            d3taus_dT3s.append(d3taus_dT3is)
+        self._d3taus_dT3 = d3taus_dT3s = d3interaction_exp_dT3(T, N, B, C, E, F, taus, dtaus_dT)
+#        for i in range(N):
+#            tausi = taus[i]
+#            dtaus_dTi = dtaus_dT[i]
+#            tau_coeffs_Bi = tau_coeffs_B[i]
+#            tau_coeffs_Ci = tau_coeffs_C[i]
+#            tau_coeffs_Ei = tau_coeffs_E[i]
+#            tau_coeffs_Fi = tau_coeffs_F[i]
+#            d3taus_dT3is = []
+#            for j in range(N):
+#                term2 = (tau_coeffs_Fi[j] + nT2inv05*tau_coeffs_Ci[j]
+#                         + T3inv*tau_coeffs_Bi[j] + T4inv3*tau_coeffs_Ei[j])
+#
+#                term3 = dtaus_dTi[j]/tausi[j]
+#
+#                term4 = (T3inv2*(tau_coeffs_Ci[j] - Tinv3*tau_coeffs_Bi[j]
+#                         - T2_12*tau_coeffs_Ei[j]))
+#
+#                d3taus_dT3is.append((term3*(6.0*term2 + term3*term3) + term4)*tausi[j])
+#
+#            d3taus_dT3s.append(d3taus_dT3is)
         return d3taus_dT3s
 
     def phis(self):
@@ -525,14 +628,17 @@ class UNIQUAC(GibbsExcess):
             return self._phis
         except AttributeError:
             pass
-        cmps, xs, rs = self.cmps, self.xs, self.rs
-        rsxs = [rs[i]*xs[i] for i in cmps]
-        self._rsxs_sum_inv = rsxs_sum_inv = 1.0/sum(rsxs)
-        # reuse the array
-        for i in cmps:
-            rsxs[i] *= rsxs_sum_inv
-        self._phis = rsxs
-        return rsxs
+        N, xs, rs = self.N, self.xs, self.rs
+
+        self._phis, self._rsxs_sum_inv = uniquac_phis(N, xs, rs)
+
+#        rsxs = [rs[i]*xs[i] for i in range(N)]
+#        self._rsxs_sum_inv = rsxs_sum_inv = 1.0/sum(rsxs)
+#        # reuse the array
+#        for i in range(N):
+#            rsxs[i] *= rsxs_sum_inv
+#        self._phis = rsxs
+        return self._phis
 
     def dphis_dxs(self):
         r'''
@@ -552,22 +658,23 @@ class UNIQUAC(GibbsExcess):
             return self._dphis_dxs
         except AttributeError:
             pass
-        N, cmps, rs = self.N, self.cmps, self.rs
+        N, rs = self.N, self.rs
 
-        rsxs = list(self.phis())
-        rsxs_sum_inv = self._rsxs_sum_inv
-        rsxs_sum_inv_m = -rsxs_sum_inv
+#        rsxs = list(self.phis())
+#        rsxs_sum_inv = self._rsxs_sum_inv
+#        rsxs_sum_inv_m = -rsxs_sum_inv
 
-        for i in cmps:
-            # reuse this array for memory savings
-            rsxs[i] *= rsxs_sum_inv_m
+#        for i in range(N):
+#            # reuse this array for memory savings
+#            rsxs[i] *= rsxs_sum_inv_m
 
-        self._dphis_dxs = dphis_dxs = [[0.0]*N for _ in cmps]
-        for j in cmps:
-            for i in cmps:
-                dphis_dxs[i][j] = rsxs[i]*rs[j]
-            # There is no symmetry to exploit here
-            dphis_dxs[j][j] += rs[j]*rsxs_sum_inv
+        self._dphis_dxs = dphis_dxs = uniquac_dphis_dxs(N, rs, self.phis(), self._rsxs_sum_inv)
+#        [[0.0]*N for _ in range(N)]
+#        for j in range(N):
+#            for i in range(N):
+#                dphis_dxs[i][j] = rsxs[i]*rs[j]
+#            # There is no symmetry to exploit here
+#            dphis_dxs[j][j] += rs[j]*rsxs_sum_inv
 
         return dphis_dxs
 
@@ -587,7 +694,7 @@ class UNIQUAC(GibbsExcess):
             return self._d2phis_dxixjs
         except AttributeError:
             pass
-        cmps, xs, rs = self.cmps, self.xs, self.rs
+        N, xs, rs = self.N, self.xs, self.rs
 
         self.phis() # Ensure the sum is there
         rsxs_sum_inv = self._rsxs_sum_inv
@@ -597,19 +704,19 @@ class UNIQUAC(GibbsExcess):
         rsxs_sum_inv_2 = rsxs_sum_inv + rsxs_sum_inv
         rsxs_sum_inv2_2 = rsxs_sum_inv2 + rsxs_sum_inv2
         rsxs_sum_inv3_2 = rsxs_sum_inv3 + rsxs_sum_inv3
-        t1s = [rsxs_sum_inv2*(rs[i]*xs[i]*rsxs_sum_inv_2  - 1.0) for i in cmps]
-        t2s = [rs[i]*xs[i]*rsxs_sum_inv3_2 for i in cmps]
+        t1s = [rsxs_sum_inv2*(rs[i]*xs[i]*rsxs_sum_inv_2  - 1.0) for i in range(N)]
+        t2s = [rs[i]*xs[i]*rsxs_sum_inv3_2 for i in range(N)]
 
-        self._d2phis_dxixjs = d2phis_dxixjs = [[None for _ in cmps] for _ in cmps]
+        self._d2phis_dxixjs = d2phis_dxixjs = [[None for _ in range(N)] for _ in range(N)]
 
-        for k in cmps:
+        for k in range(N):
             # There is symmetry here, but it is complex. 4200 of 8000 (N=20) values are unique.
             # Due to the very large matrices, no gains to be had by exploiting it in this function
             d2phis_dxixjsk = d2phis_dxixjs[k]
-            for j in cmps:
+            for j in range(N):
                 # Fastest I can test
                 d2phis_dxixjsk[j] = [rs[k]*rs[j]*t1s[i] if (i == k or i == j) and j != k
-                                       else rs[k]*rs[j]*t2s[i] for i in cmps]
+                                       else rs[k]*rs[j]*t2s[i] for i in range(N)]
             d2phis_dxixjs[k][k][k] -= rs[k]*rs[k]*rsxs_sum_inv2_2
 
         return d2phis_dxixjs
@@ -633,15 +740,17 @@ class UNIQUAC(GibbsExcess):
             return self._thetas
         except AttributeError:
             pass
-        cmps, xs = self.cmps, self.xs
+        N, xs = self.N, self.xs
         qs = self.qs
-        qsxs = [qs[i]*xs[i] for i in cmps]
-        self._qsxs_sum_inv = qsxs_sum_inv = 1.0/sum(qsxs)
-        # reuse the array qsxs to store thetas
-        for i in cmps:
-            qsxs[i] *= qsxs_sum_inv
-        self._thetas = qsxs
-        return qsxs
+#        qsxs = [qs[i]*xs[i] for i in range(N)]
+#        self._qsxs_sum_inv = qsxs_sum_inv = 1.0/sum(qsxs)
+#        # reuse the array qsxs to store thetas
+#        for i in range(N):
+#            qsxs[i] *= qsxs_sum_inv
+#        self._thetas = qsxs
+
+        self._thetas, self._qsxs_sum_inv = uniquac_phis(N, xs, qs)
+        return self._thetas
 
     def dthetas_dxs(self):
         r'''
@@ -661,22 +770,25 @@ class UNIQUAC(GibbsExcess):
             return self._dthetas_dxs
         except AttributeError:
             pass
-        N, cmps, qs = self.N, self.cmps, self.qs
+        N, qs = self.N, self.qs
 
-        qsxs = list(self.thetas())
-        qsxs_sum_inv = self._qsxs_sum_inv
-        qsxs_sum_inv_m = -qsxs_sum_inv
+        self._dthetas_dxs = dthetas_dxs = uniquac_dphis_dxs(N, qs, self.thetas(), self._qsxs_sum_inv)
 
-        for i in cmps:
-            # reuse this array for memory savings
-            qsxs[i] *= qsxs_sum_inv_m
 
-        self._dthetas_dxs = dthetas_dxs = [[0.0]*N for _ in cmps]
-        for j in cmps:
-            for i in cmps:
-                dthetas_dxs[i][j] = qsxs[i]*qs[j]
-            # There is no symmetry to exploit here
-            dthetas_dxs[j][j] += qs[j]*qsxs_sum_inv
+#        qsxs = list(self.thetas())
+#        qsxs_sum_inv = self._qsxs_sum_inv
+#        qsxs_sum_inv_m = -qsxs_sum_inv
+#
+#        for i in range(N):
+#            # reuse this array for memory savings
+#            qsxs[i] *= qsxs_sum_inv_m
+#
+#        self._dthetas_dxs = dthetas_dxs = [[0.0]*N for _ in range(N)]
+#        for j in range(N):
+#            for i in range(N):
+#                dthetas_dxs[i][j] = qsxs[i]*qs[j]
+#            # There is no symmetry to exploit here
+#            dthetas_dxs[j][j] += qs[j]*qsxs_sum_inv
 
         return dthetas_dxs
 
@@ -696,7 +808,7 @@ class UNIQUAC(GibbsExcess):
             return self._d2thetas_dxixjs
         except AttributeError:
             pass
-        N, cmps, xs, qs = self.N, self.cmps, self.xs, self.qs
+        N, xs, qs = self.N, self.xs, self.qs
 
         self.thetas() # Ensure the sum is there
         qsxs_sum_inv = self._qsxs_sum_inv
@@ -706,19 +818,19 @@ class UNIQUAC(GibbsExcess):
         qsxs_sum_inv_2 = qsxs_sum_inv + qsxs_sum_inv
         qsxs_sum_inv2_2 = qsxs_sum_inv2 + qsxs_sum_inv2
         qsxs_sum_inv3_2 = qsxs_sum_inv3 + qsxs_sum_inv3
-        t1s = [qsxs_sum_inv2*(qs[i]*xs[i]*qsxs_sum_inv_2  - 1.0) for i in cmps]
-        t2s = [qs[i]*xs[i]*qsxs_sum_inv3_2 for i in cmps]
+        t1s = [qsxs_sum_inv2*(qs[i]*xs[i]*qsxs_sum_inv_2  - 1.0) for i in range(N)]
+        t2s = [qs[i]*xs[i]*qsxs_sum_inv3_2 for i in range(N)]
 
-        self._d2thetas_dxixjs = d2thetas_dxixjs = [[None for _ in cmps] for _ in cmps]
+        self._d2thetas_dxixjs = d2thetas_dxixjs = [[None for _ in range(N)] for _ in range(N)]
 
-        for k in cmps:
+        for k in range(N):
             # There is symmetry here, but it is complex. 4200 of 8000 (N=20) values are unique.
             # Due to the very large matrices, no gains to be had by exploiting it in this function
             d2thetas_dxixjsk = d2thetas_dxixjs[k]
-            for j in cmps:
+            for j in range(N):
                 # Fastest I can test
                 d2thetas_dxixjsk[j] = [qs[k]*qs[j]*t1s[i] if (i == k or i == j) and j != k
-                                       else qs[k]*qs[j]*t2s[i] for i in cmps]
+                                       else qs[k]*qs[j]*t2s[i] for i in range(N)]
             d2thetas_dxixjs[k][k][k] -= qs[k]*qs[k]*qsxs_sum_inv2_2
 
         return d2thetas_dxixjs
@@ -739,13 +851,13 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             taus = self.taus()
 
-        cmps = self.cmps
-        self._thetaj_taus_jis = thetaj_taus_jis = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += thetas[j]*taus[j][i]
-            thetaj_taus_jis.append(tot)
+        N = self.N
+        self._thetaj_taus_jis = thetaj_taus_jis = uniquac_thetaj_taus_jis(N, taus, thetas)
+#        for i in range(N):
+#            tot = 0.0
+#            for j in range(N):
+#                tot += thetas[j]*taus[j][i]
+#            thetaj_taus_jis.append(tot)
         return thetaj_taus_jis
 
     def thetaj_taus_ijs(self):
@@ -764,13 +876,13 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             taus = self.taus()
 
-        cmps = self.cmps
-        self._thetaj_taus_ijs = thetaj_taus_ijs = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += thetas[j]*taus[i][j]
-            thetaj_taus_ijs.append(tot)
+        N = self.N
+        self._thetaj_taus_ijs = thetaj_taus_ijs = uniquac_thetaj_taus_ijs(N, taus, thetas)
+#        for i in range(N):
+#            tot = 0.0
+#            for j in range(N):
+#                tot += thetas[j]*taus[i][j]
+#            thetaj_taus_ijs.append(tot)
         return thetaj_taus_ijs
 
     def thetaj_dtaus_dT_jis(self):
@@ -788,13 +900,13 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             dtaus_dT = self.dtaus_dT()
 
-        cmps = self.cmps
-        self._thetaj_dtaus_dT_jis = thetaj_dtaus_dT_jis = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += thetas[j]*dtaus_dT[j][i]
-            thetaj_dtaus_dT_jis.append(tot)
+        N = self.N
+        self._thetaj_dtaus_dT_jis = thetaj_dtaus_dT_jis = uniquac_thetaj_taus_jis(N, dtaus_dT, thetas)
+#        for i in range(N):
+#            tot = 0.0
+#            for j in range(N):
+#                tot += thetas[j]*dtaus_dT[j][i]
+#            thetaj_dtaus_dT_jis.append(tot)
         return thetaj_dtaus_dT_jis
 
 
@@ -814,13 +926,13 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             d2taus_dT2 = self.d2taus_dT2()
 
-        cmps = self.cmps
-        self._thetaj_d2taus_dT2_jis = thetaj_d2taus_dT2_jis = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += thetas[j]*d2taus_dT2[j][i]
-            thetaj_d2taus_dT2_jis.append(tot)
+        N = self.N
+        self._thetaj_d2taus_dT2_jis = thetaj_d2taus_dT2_jis = uniquac_thetaj_taus_jis(N, d2taus_dT2, thetas)
+#        for i in range(N):
+#            tot = 0.0
+#            for j in range(N):
+#                tot += thetas[j]*d2taus_dT2[j][i]
+#            thetaj_d2taus_dT2_jis.append(tot)
         return thetaj_d2taus_dT2_jis
 
     def thetaj_d3taus_dT3_jis(self):
@@ -837,13 +949,13 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             d3taus_dT3 = self.d3taus_dT3()
 
-        cmps = self.cmps
-        self._thetaj_d3taus_dT3_jis = thetaj_d3taus_dT3_jis = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += thetas[j]*d3taus_dT3[j][i]
-            thetaj_d3taus_dT3_jis.append(tot)
+        N = self.N
+        self._thetaj_d3taus_dT3_jis = thetaj_d3taus_dT3_jis = uniquac_thetaj_taus_jis(N, d3taus_dT3, thetas)
+#        for i in range(N):
+#            tot = 0.0
+#            for j in range(N):
+#                tot += thetas[j]*d3taus_dT3[j][i]
+#            thetaj_d3taus_dT3_jis.append(tot)
         return thetaj_d3taus_dT3_jis
 
     def GE(self):
@@ -867,21 +979,21 @@ class UNIQUAC(GibbsExcess):
             return self._GE
         except AttributeError:
             pass
-        T, cmps, xs = self.T, self.cmps, self.xs
+        T, N, xs = self.T, self.N, self.xs
         qs = self.qs
         phis = self.phis()
         thetas = self.thetas()
         thetaj_taus_jis = self.thetaj_taus_jis()
 
-        gE = 0.0
-        z_2 = 0.5*self.z
-        for i in cmps:
-            gE += xs[i]*log(phis[i]/xs[i])
-            gE += z_2*qs[i]*xs[i]*log(thetas[i]/phis[i])
-            gE -= qs[i]*xs[i]*log(thetaj_taus_jis[i])
-
-        gE *= R*T
-        self._GE = gE
+#        gE = 0.0
+#        z_2 = 0.5*self.z
+#        for i in range(N):
+#            gE += xs[i]*log(phis[i]/xs[i])
+#            gE += z_2*qs[i]*xs[i]*log(thetas[i]/phis[i])
+#            gE -= qs[i]*xs[i]*log(thetaj_taus_jis[i])
+#
+#        gE *= R*T
+        self._GE = gE = uniquac_GE(T, N, self.z, xs, qs, phis, thetas, thetaj_taus_jis)
         return gE
 
     def dGE_dT(self):
@@ -906,18 +1018,18 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             pass
 
-        T, cmps, xs = self.T, self.cmps, self.xs
+        T, N, xs = self.T, self.N, self.xs
         qs = self.qs
         thetaj_taus_jis = self.thetaj_taus_jis()
         thetaj_dtaus_dT_jis = self.thetaj_dtaus_dT_jis()
 
-        dGE = self.GE()/T
-
-        tot = 0.0
-        for i in cmps:
-            tot -= qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]/thetaj_taus_jis[i]
-        dGE += R*T*tot
-        self._dGE_dT = dGE
+#        dGE = self.GE()/T
+#
+#        tot = 0.0
+#        for i in range(N):
+#            tot -= qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]/thetaj_taus_jis[i]
+#        dGE += R*T*tot
+        self._dGE_dT = dGE = uniquac_dGE_dT(T, N, self.GE(), xs, qs, thetaj_taus_jis, thetaj_dtaus_dT_jis)
         return dGE
 
     def d2GE_dT2(self):
@@ -944,7 +1056,7 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             pass
 
-        T, cmps, xs = self.T, self.cmps, self.xs
+        T, N, xs = self.T, self.N, self.xs
         qs = self.qs
         thetaj_taus_jis = self.thetaj_taus_jis()
         thetaj_dtaus_dT_jis = self.thetaj_dtaus_dT_jis()
@@ -953,13 +1065,14 @@ class UNIQUAC(GibbsExcess):
         GE = self.GE()
         dGE_dT = self.dGE_dT()
 
-        tot = 0.0
-        for i in cmps:
-            tot += qs[i]*xs[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]
-            tot -= qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**2/thetaj_taus_jis[i]**2
-        d2GE_dT2 = T*tot - 2.0/(R*T)*(dGE_dT - GE/T)
-        d2GE_dT2 *= -R
-        self._d2GE_dT2 = d2GE_dT2
+#        tot = 0.0
+#        for i in range(N):
+#            tot += qs[i]*xs[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]
+#            tot -= qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**2/thetaj_taus_jis[i]**2
+#        d2GE_dT2 = T*tot - 2.0/(R*T)*(dGE_dT - GE/T)
+#        d2GE_dT2 *= -R
+        self._d2GE_dT2 = d2GE_dT2 = uniquac_d2GE_dT2(T, N, GE, dGE_dT, xs, qs, thetaj_taus_jis,
+                                                     thetaj_dtaus_dT_jis, thetaj_d2taus_dT2_jis)
         return d2GE_dT2
 
     def d3GE_dT3(self):
@@ -988,24 +1101,27 @@ class UNIQUAC(GibbsExcess):
         except AttributeError:
             pass
 
-        T, cmps, xs = self.T, self.cmps, self.xs
+        T, N, xs = self.T, self.N, self.xs
         qs = self.qs
         thetaj_taus_jis = self.thetaj_taus_jis()
         thetaj_dtaus_dT_jis = self.thetaj_dtaus_dT_jis()
         thetaj_d2taus_dT2_jis = self.thetaj_d2taus_dT2_jis()
         thetaj_d3taus_dT3_jis = self.thetaj_d3taus_dT3_jis()
 
-        Ttot, tot = 0.0, 0.0
+#        Ttot, tot = 0.0, 0.0
+#
+#        for i in range(N):
+#            Ttot += qs[i]*xs[i]*thetaj_d3taus_dT3_jis[i]/thetaj_taus_jis[i]
+#            Ttot -= 3.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]**2
+#            Ttot += 2.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**3/thetaj_taus_jis[i]**3
+#
+#            tot += 3.0*qs[i]*xs[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]
+#            tot -= 3.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**2/thetaj_taus_jis[i]**2
 
-        for i in cmps:
-            Ttot += qs[i]*xs[i]*thetaj_d3taus_dT3_jis[i]/thetaj_taus_jis[i]
-            Ttot -= 3.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]**2
-            Ttot += 2.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**3/thetaj_taus_jis[i]**3
-
-            tot += 3.0*qs[i]*xs[i]*thetaj_d2taus_dT2_jis[i]/thetaj_taus_jis[i]
-            tot -= 3.0*qs[i]*xs[i]*thetaj_dtaus_dT_jis[i]**2/thetaj_taus_jis[i]**2
-
-        self._d3GE_dT3 = d3GE_dT3 = -R*(T*Ttot + tot)
+        self._d3GE_dT3 = d3GE_dT3 = uniquac_d3GE_dT3(T, N, xs, qs, thetaj_taus_jis,
+                     thetaj_dtaus_dT_jis, thetaj_d2taus_dT2_jis,
+                     thetaj_d3taus_dT3_jis)
+#        -R*(T*Ttot + tot)
         return d3GE_dT3
 
     def dGE_dxs(self):
@@ -1033,7 +1149,7 @@ class UNIQUAC(GibbsExcess):
         Notes
         -----
         '''
-        z, T, xs, cmps = self.z, self.T, self.xs, self.cmps
+        z, T, xs, N = self.z, self.T, self.xs, self.N
         qs = self.qs
         taus = self.taus()
         phis = self.phis()
@@ -1045,17 +1161,21 @@ class UNIQUAC(GibbsExcess):
         dGE_dxs = []
         RT = R*T
 
-        for i in cmps:
+        for i in range(N):
             # i is what is being differentiated
             tot = 0.0
-            for j in cmps:
+            for j in range(N):
                 # dthetas_dxs and dphis_dxs indexes could be an issue
                 tot += 0.5*qs[j]*xs[j]*phis[j]*z/thetas[j]*(
                         1.0/phis[j]*dthetas_dxs[j][i]
                         - thetas[j]/phis[j]**2*dphis_dxs[j][i]
                         )
 
-                tot -= qs[j]*xs[j]*sum(taus[k][j]*dthetas_dxs[k][i] for k in cmps)/thetaj_taus_jis[j]
+                tot3 = 0.0
+                for k in range(N):
+                    tot3 += taus[k][j]*dthetas_dxs[k][i]
+
+                tot -= qs[j]*xs[j]*tot3/thetaj_taus_jis[j]
                 if i != j:
                     # Double index issue
                     tot += xs[j]/phis[j]*dphis_dxs[j][i]
@@ -1105,7 +1225,8 @@ class UNIQUAC(GibbsExcess):
             return self._d2GE_dTdxs
         except AttributeError:
             pass
-        z, T, xs, cmps = self.z, self.T, self.xs, self.cmps
+        # !!!!! Missing unit test for this!!!!! TODO TODO TODO
+        z, T, xs, N = self.z, self.T, self.xs, self.N
         qs = self.qs
         taus = self.taus()
         phis = self.phis()
@@ -1120,7 +1241,7 @@ class UNIQUAC(GibbsExcess):
         d2GE_dTdxs = []
 
         # index style - [THE THETA FOR WHICH THE DERIVATIVE IS BEING CALCULATED][THE VARIABLE BEING CHANGED CAUsING THE DIFFERENCE]
-        for i in cmps:
+        for i in range(N):
             # i is what is being differentiated
             tot, Ttot = 0.0, 0.0
             Ttot += qs[i]*thetaj_dtaus_dT_jis[i]/thetaj_taus_jis[i]
@@ -1128,13 +1249,13 @@ class UNIQUAC(GibbsExcess):
             t50_sum = 0.0
             t51_sum = 0.0
             t52_sum = 0.0
-            for j in cmps:
+            for j in range(N):
                 ## Temperature multiplied terms
-                t49 = qs[j]*xs[j]*(sum([dtaus_dT[k][j]*dthetas_dxs[k][i] for k in cmps]))/thetaj_taus_jis[j]
+                t49 = qs[j]*xs[j]*(sum([dtaus_dT[k][j]*dthetas_dxs[k][i] for k in range(N)]))/thetaj_taus_jis[j]
                 Ttot += t49
                 t49_sum += t49
 
-                t50 = qs[j]*xs[j]*(sum([dtaus_dT[k][j]*thetas[k] for k in cmps])*sum([dthetas_dxs[k][i]*taus[k][j] for k in cmps])
+                t50 = qs[j]*xs[j]*(sum([dtaus_dT[k][j]*thetas[k] for k in range(N)])*sum([dthetas_dxs[k][i]*taus[k][j] for k in range(N)])
                                    )/thetaj_taus_jis[j]**2
                 Ttot -= t50
                 t50_sum -= t50
@@ -1145,7 +1266,7 @@ class UNIQUAC(GibbsExcess):
                 tot += t51
 
                 term = 0.0
-                for k in cmps:
+                for k in range(N):
                     term += taus[k][j]*dthetas_dxs[k][i]
 
                 t52 = qs[j]*xs[j]*term/thetaj_taus_jis[j]
@@ -1190,7 +1311,7 @@ class UNIQUAC(GibbsExcess):
             return self._d2GE_dxixjs
         except AttributeError:
             pass
-        z, T, xs, cmps = self.z, self.T, self.xs, self.cmps
+        z, T, xs, N = self.z, self.T, self.xs, self.N
         qs = self.qs
         taus = self.taus()
         phis = self.phis()
@@ -1203,19 +1324,18 @@ class UNIQUAC(GibbsExcess):
         d2thetas_dxixjs = self.d2thetas_dxixjs()
 
         thetaj_taus_jis = self.thetaj_taus_jis()
-        thetaj_dtaus_dT_jis = self.thetaj_dtaus_dT_jis()
         RT = R*T
 
         # index style - [THE THETA FOR WHICH THE DERIVATIVE IS BEING CALCULATED][THE VARIABLE BEING CHANGED CAUsING THE DIFFERENCE]
 
         # You want to index by [i][k]
-        tau_mk_dthetam_xi = [[sum([taus[m][j]*dthetas_dxs[m][i] for m in cmps]) for j in cmps] for i in cmps]
+        tau_mk_dthetam_xi = [[sum([taus[m][j]*dthetas_dxs[m][i] for m in range(N)]) for j in range(N)] for i in range(N)]
 
 
         self._d2GE_dxixjs = d2GE_dxixjs = []
-        for i in cmps:
+        for i in range(N):
             dG_row = []
-            for j in cmps:
+            for j in range(N):
                 ij_min = min(i, j)
                 ij_max = max(i, j)
                 tot = 0.0
@@ -1239,7 +1359,7 @@ class UNIQUAC(GibbsExcess):
 
                 # 2-4 - two calculations
                 # checked numerically Don't ask questions...
-                for m in cmps:
+                for m in range(N):
                     # This one looks like m != j should not be part
                     if i < j:
                         if m != i:
@@ -1264,7 +1384,7 @@ class UNIQUAC(GibbsExcess):
                 # Now good, checked numerically
                 # This one looks like m != j should not be part
                 # 8
-                for m in cmps:
+                for m in range(N):
 #                    if m != i and m != j:
                     if i < j:
                         if m != i:
@@ -1275,11 +1395,11 @@ class UNIQUAC(GibbsExcess):
                 # 9
 #                v -= xs[i]*dphis_dxs[i][i]*dphis_dxs[i][j]/phis[i]**2
 
-                for k in cmps:
+                for k in range(N):
                     # 12-15
                     # Good, checked with sympy/numerically
                     thing = 0.0
-                    for m in cmps:
+                    for m in range(N):
                         thing  += taus[m][k]*d2thetas_dxixjs[i][j][m]
                     tot -= qs[k]*xs[k]*thing/thetaj_taus_jis[k]
 

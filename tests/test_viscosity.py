@@ -43,6 +43,23 @@ from thermo.viscosity import (COOLPROP, DIPPR_PERRY_8E, VDI_PPDS, DUTT_PRASAD, V
 @pytest.mark.meta_T_dept
 def test_ViscosityLiquid():
     EtOH = ViscosityLiquid(MW=46.06844, Tm=159.05, Tc=514.0, Pc=6137000.0, Vc=0.000168, omega=0.635, Psat=7872.16, Vml=5.8676e-5, CASRN='64-17-5')
+
+    # Test json export
+    EtOH2 = ViscosityLiquid.from_JSON(EtOH.as_JSON())
+    assert EtOH.__dict__ == EtOH2.__dict__
+
+    # Test json export with interpolator objects
+    EtOH.method = VDI_TABULAR
+    EtOH.T_dependent_property(315)
+    s = EtOH.as_JSON()
+    EtOH2 = ViscosityLiquid.from_JSON(s)
+    # Do hash checks before interpolation object exists
+    assert hash(EtOH) == hash(EtOH2)
+    assert EtOH == EtOH2
+    assert id(EtOH) != id(EtOH2)
+
+    assert EtOH.T_dependent_property(315) == EtOH2.T_dependent_property(315)
+
     EtOH.method = (COOLPROP)
     assert_close(EtOH.T_dependent_property(298.15), 0.0010823506202025659, rtol=1e-9)
     EtOH.method = (DIPPR_PERRY_8E)
@@ -103,6 +120,12 @@ def test_ViscosityLiquid():
     EtOH.add_tabular_data_P(Ts, Ps, TP_data, name='CPdata')
     recalc_pts = [[EtOH.TP_dependent_property(T, P) for T in Ts] for P in Ps]
     assert_close2d(TP_data, recalc_pts)
+
+    # TEst thta we can export to json, create a new instance with P interpolation objects
+    EtOH2 = ViscosityLiquid.from_JSON( EtOH.as_JSON())
+    recalc_pts2 = [[EtOH2.TP_dependent_property(T, P) for T in Ts] for P in Ps]
+    assert_close2d(recalc_pts, recalc_pts2, atol=0, rtol=0)
+
 
     EtOH.tabular_extrapolation_permitted = False
     EtOH.forced_P = True
@@ -225,6 +248,12 @@ def test_ViscosityLiquidMixture():
     obj = ViscosityLiquidMixture(ViscosityLiquids=ViscosityLiquids, CASs=['56-23-5', '67-63-0'], MWs=[153.8227, 60.09502])
     mu = obj.mixture_property(T, P, zs, ws)
     assert_close(mu, 0.0009948528627794172)
+
+    s = obj.as_JSON()
+
+    assert 'json_version' in s
+    obj2 = ViscosityLiquidMixture.from_JSON(s)
+    assert obj == obj2
 
     mu = obj.calculate(T, P, zs, ws, MIXING_LOG_MOLAR)
     assert_close(mu, 0.0009948528627794172)

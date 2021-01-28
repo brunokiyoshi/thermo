@@ -151,7 +151,7 @@ class ChemicalConstantsPackage(object):
     properties = ('atom_fractions',) + non_vector_properties
     '''Tuple of all properties that can be held by this object.'''
 
-    __slots__ = properties + ('N', 'cmps', 'water_index', 'n_atoms')
+    __slots__ = properties + ('N', 'cmps', 'water_index', 'n_atoms') + ('json_version',)
     non_vectors = ('atom_fractions',)
     non_vectors_set = set(non_vectors)
 
@@ -195,7 +195,11 @@ class ChemicalConstantsPackage(object):
         '''
         if json is None:
             get_json()
-        return json.dumps(self.__dict__)
+
+        d = self.__dict__ # Not a the real object dictionary
+        d['json_version'] = 1
+        ans = json.dumps(d)
+        return ans
 
     @classmethod
     def from_JSON(cls, string):
@@ -237,6 +241,7 @@ class ChemicalConstantsPackage(object):
             # keys are stored as strings and not ints
             d[k] = [{int(k): v for k, v in r.items()} if r is not None else r for r in d[k]]
 
+        del d['json_version']
         return cls(**d)
 
     def __hash__(self):
@@ -244,6 +249,9 @@ class ChemicalConstantsPackage(object):
         for k in self.properties:
             hashes.append(hash_any_primitive(getattr(self, k)))
         return hash_any_primitive(hashes)
+
+    def __eq__(self, other):
+        return self.__hash__() == other.__hash__()
 
     def with_new_constants(self, **kwargs):
         r'''Method to construct a new ChemicalConstantsPackage that replaces or
@@ -816,10 +824,9 @@ class ChemicalConstantsPackage(object):
                                                                 omega=omegas[i], Hfus=Hfus_Tms[i], poly_fit=get_chemical_constants(CASs[i], 'ThermalConductivityLiquid'))
                                     for i in range(N)]
 
-        Cvgm_calcs = [lambda T : HeatCapacityGases[i].T_dependent_property(T) - R for i in range(N)]
         ThermalConductivityGases =[ThermalConductivityGas(CASRN=CASs[i], MW=MWs[i], Tb=Tbs[i], Tc=Tcs[i], Pc=Pcs[i], Vc=Vcs[i],
                                                           Zc=Zcs[i], omega=omegas[i], dipole=dipoles[i], Vmg=VolumeGases[i],
-                                                          Cvgm=Cvgm_calcs[i], mug=ViscosityGases[i].T_dependent_property,
+                                                          Cpgm=HeatCapacityGases[i].T_dependent_property, mug=ViscosityGases[i].T_dependent_property,
                                                           poly_fit=get_chemical_constants(CASs[i], 'ThermalConductivityGas'))
                                                           for i in range(N)]
         properties = PropertyCorrelationsPackage(constants, VaporPressures=VaporPressures, SublimationPressures=SublimationPressures,
@@ -1474,7 +1481,7 @@ class PropertyCorrelationsPackage(object):
                                                                Tc=constants.Tcs[i], Pc=constants.Pcs[i], Vc=constants.Vcs[i],
                                                                Zc=constants.Zcs[i], omega=constants.omegas[i], dipole=constants.dipoles[i],
                                                                Vmg=VolumeGases[i], mug=ViscosityLiquids[i].T_dependent_property,
-                                                               Cvgm=lambda T : HeatCapacityGases[i].T_dependent_property(T) - R)
+                                                               Cpgm=HeatCapacityGases[i].T_dependent_property)
                                                 for i in cmps]
 
         if SurfaceTensions is None and not skip_missing:
