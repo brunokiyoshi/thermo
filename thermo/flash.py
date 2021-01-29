@@ -2658,14 +2658,15 @@ def solve_PTV_HSGUA_1P(phase, zs, fixed_var_val, spec_val, fixed_var,
     # The cost should be less.
 
     if iter_var == 'T':
-        min_bound = Phase.T_MIN_FIXED
-        max_bound = Phase.T_MAX_FIXED
         if isinstance(phase, CoolPropPhase):
             min_bound = phase.AS.Tmin()
             max_bound = phase.AS.Tmax()
-        if isinstance(phase, IAPWS95):
-            min_bound = 235.0
-            max_bound = 5000.0
+        else:
+            min_bound = phase.T_MIN_FIXED
+            max_bound = phase.T_MAX_FIXED
+#        if isinstance(phase, IAPWS95):
+#            min_bound = 235.0
+#            max_bound = 5000.0
     elif iter_var == 'P':
         min_bound = Phase.P_MIN_FIXED*(1.0 - 1e-12)
         max_bound = Phase.P_MAX_FIXED*(1.0 + 1e-12)
@@ -2682,10 +2683,10 @@ def solve_PTV_HSGUA_1P(phase, zs, fixed_var_val, spec_val, fixed_var,
             b = sum([c2R*Tcs[i]*zs[i]/Pcs[i] for i in constants.cmps])
             min_bound = b*(1.0 + 1e-15)
 
-    if isinstance(phase, gas_phases):
+    if phase.is_gas:
         methods = [LAST_CONVERGED, FIXED_GUESS, STP_T_GUESS, IG_ENTHALPY,
                    LASTOVKA_SHAW]
-    elif isinstance(phase, liquid_phases):
+    elif phase.is_liquid:
         methods = [LAST_CONVERGED, FIXED_GUESS, STP_T_GUESS, IDEAL_LIQUID_ENTHALPY,
                    DADGOSTAR_SHAW_1]
     else:
@@ -4351,11 +4352,10 @@ class Flash(object):
 
             g, ls, ss, betas = identify_sort_phases(id_phases, betas, constants,
                                                     correlations, settings=settings,
-                                                    skip_solids=not bool(self.solids))
+                                                    skip_solids=self.skip_solids)
 
             a_phase = id_phases[0]
-            T, P = a_phase.T, a_phase.P
-            return dest(T, P, zs, gas=g, liquids=ls, solids=ss,
+            return dest(a_phase.T, a_phase.P, zs, gas=g, liquids=ls, solids=ss,
                                     betas=betas, flash_specs=flash_specs,
                                     flash_convergence=flash_convergence,
                                     constants=constants, correlations=correlations,
@@ -4388,7 +4388,7 @@ class Flash(object):
                                     flasher=self)
         elif T_spec and SF_spec:
             Psub, other_phase, s, iterations, err = self.flash_TSF(T, SF=SF, zs=zs, hot_start=hot_start)
-            if isinstance(other_phase, gas_phases):
+            if other_phase.is_gas:
                 g, liquids = other_phase, []
             else:
                 g, liquids = None, [other_phase]
@@ -4401,7 +4401,7 @@ class Flash(object):
                                     flasher=self)
         elif P_spec and SF_spec:
             Tsub, other_phase, s, iterations, err = self.flash_PSF(P, SF=SF, zs=zs, hot_start=hot_start)
-            if isinstance(other_phase, gas_phases):
+            if other_phase.is_gas:
                 g, liquids = other_phase, []
             else:
                 g, liquids = None, [other_phase]
@@ -4464,7 +4464,7 @@ class Flash(object):
             if self.N > 1:
                 g, ls, ss, betas = identify_sort_phases(phases, betas, constants,
                                                         correlations, settings=settings,
-                                                        skip_solids=not bool(self.solids))
+                                                        skip_solids=self.skip_solids)
 
             return dest(T, P, zs, gas=g, liquids=ls, solids=ss,
                                     betas=betas, flash_specs=flash_specs,
@@ -5519,6 +5519,7 @@ class FlashVL(Flash):
     HSGUA_NEWTON_ANALYTICAL_JAC = True
 
     solids = None
+    skip_solids = True
     K_composition_independent = False
 
     max_liquids = 1
@@ -6262,6 +6263,8 @@ class FlashVLN(FlashVL):
         self.phases = [gas] + liquids if gas is not None else liquids
         if solids:
             raise ValueError("Solids are not supported in this model")
+            self.skip_solids = not bool(solids)
+
 
         liquids_to_unique_liquids = []
         unique_liquids, unique_liquid_hashes = [], []
@@ -6508,7 +6511,7 @@ class FlashVLN(FlashVL):
         if sln_2P is not None and self.DOUBLE_CHECK_2P:
             g_id, ls_id, _, _ = identify_sort_phases(found_phases, found_betas, self.constants,
                                                     self.correlations, settings=self.settings,
-                                                    skip_solids=not bool(self.solids))
+                                                    skip_solids=self.skip_solids)
             if g_id is None:
                 another_phase, base_phase = gas, liquids[0]
             else:
@@ -6935,6 +6938,8 @@ class FlashPureVLS(Flash):
         self.liquid = liquids[0] if len(liquids) else None
         self.solid_count = len(solids)
 
+        self.skip_solids = not bool(solids)
+
         self.phase_count = self.gas_count + self.liquid_count + self.solid_count
 
         if gas is not None:
@@ -6954,8 +6959,9 @@ class FlashPureVLS(Flash):
         self.VL_only = self.phase_count == 2 and self.liquid_count == 1 and self.gas is not None
         self.VL_only_CEOSs = (self.VL_only and gas and liquids and isinstance(self.liquids[0], CEOSLiquid) and isinstance(self.gas, CEOSGas))
 
-        self.VL_only_IAPWS95 = (len(liquids) == 1 and isinstance(liquids[0], IAPWS95Liquid)
-                                 and isinstance(gas, IAPWS95Gas) and (not solids))
+        self.VL_only_IAPWS95 = (len(liquids) == 1 and (isinstance(liquids[0], IAPWS95Liquid) or liquids[0].__class__.__name__ == 'IAPWS95Liquid')
+                                 and (isinstance(gas, IAPWS95Gas) or  gas.__class__.__name__ == 'IAPWS95Gas')
+                                and (not solids))
 
         # TODO implement as function of phases/or EOS
         self.VL_only_CEOSs_same = (self.VL_only_CEOSs and
@@ -7006,9 +7012,6 @@ class FlashPureVLS(Flash):
 
     def flash_TPV(self, T, P, V, zs=None, solution=None, hot_start=None):
         betas = [1.0]
-        zs = [1.0]
-        liquids = []
-        solids = []
 
         if solution is None:
             fun = lambda obj: obj.G()
@@ -7021,7 +7024,10 @@ class FlashPureVLS(Flash):
         else:
             raise ValueError("Did not recognize solution %s" %(solution))
 
-        if self.VL_only_CoolProp:
+        if self.phase_count == 1:
+            phase = self.phases[0].to(zs=zs, T=T, P=P, V=V)
+            return None, [phase], [], betas, None
+        elif self.VL_only_CoolProp:
             sln = self.gas.to(zs, T=T, P=P, V=V, prefer_phase=8)
 #            if sln.phase == 'l':
 #                return None, [sln], [], betas, None
@@ -7098,6 +7104,8 @@ class FlashPureVLS(Flash):
         else:
             G_min, lowest_phase = 1e100, None
             gas = None
+
+        liquids = []
         for l in self.liquids:
             l = l.to(zs=zs, T=T, P=P, V=V)
             G = fun(l)
@@ -7105,6 +7113,8 @@ class FlashPureVLS(Flash):
                 G_min, lowest_phase = G, l
             liquids.append(l)
 
+
+        solids = []
         for s in self.solids:
             s = s.to(zs=zs, T=T, P=P, V=V)
             G = fun(s)
@@ -7468,11 +7478,11 @@ class FlashPureVLS(Flash):
         if results_G_min_1P is not None:
             betas = [1.0]
             T, phase, iterations, err, _ = results_G_min_1P
-            if isinstance(phase, gas_phases):
+            if phase.is_gas:
                 gas_phase = results_G_min_1P[1]
-            elif isinstance(phase, liquid_phases):
+            elif phase.is_liquid:
                 ls = [results_G_min_1P[1]]
-            elif isinstance(phase, solid_phases):
+            elif phase.is_solid:
                 ss = [results_G_min_1P[1]]
 
         flash_convergence = {}
