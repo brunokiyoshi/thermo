@@ -77,8 +77,34 @@ def transform_complete_thermo(replaced, __funcs, __all__, normal, vec=False):
                  'regular_solution.regular_solution_d2GE_dxixjs',
                  'regular_solution.regular_solution_d3GE_dxixjxks',
                  'regular_solution.RegularSolution',
+
+                 'wilson.Wilson',
+                 'wilson.wilson_xj_Lambda_ijs', 'wilson.wilson_d2GE_dTdxs',
+                 'wilson.wilson_dGE_dxs', 'wilson.wilson_d2GE_dxixjs',
+                 'wilson.wilson_d3GE_dxixjxks', 'wilson.wilson_gammas',
+
+                 'nrtl.NRTL',
+                 'nrtl.nrtl_gammas',
+                 'nrtl.nrtl_taus',
+                 'nrtl.nrtl_dtaus_dT',
+                 'nrtl.nrtl_d2taus_dT2',
+                 'nrtl.nrtl_d3taus_dT3',
+                 'nrtl.nrtl_alphas',
+                 'nrtl.nrtl_Gs',
+                 'nrtl.nrtl_dGs_dT',
+                 'nrtl.nrtl_d2Gs_dT2',
+                 'nrtl.nrtl_d3Gs_dT3',
+                 'nrtl.nrtl_xj_Gs_jis_and_Gs_taus_jis',
+                 'nrtl.nrtl_xj_Gs_jis',
+                 'nrtl.nrtl_xj_Gs_taus_jis',
+                 'nrtl.nrtl_dGE_dxs',
+                 'nrtl.nrtl_d2GE_dxixjs',
+                 'nrtl.nrtl_d2GE_dTdxs',
+
                  'activity.gibbs_excess_gammas', 'activity.gibbs_excess_dHE_dxs',
                  'activity.gibbs_excess_dgammas_dns', 'activity.gibbs_excess_dgammas_dT',
+                 'activity.interaction_exp', 'activity.dinteraction_exp_dT',
+                 'activity.d2interaction_exp_dT2', 'activity.d3interaction_exp_dT3',
 
                  'eos_alpha_functions.PR_a_alphas_vectorized',
                  'eos_alpha_functions.PR_a_alpha_and_derivatives_vectorized',
@@ -110,6 +136,20 @@ def transform_complete_thermo(replaced, __funcs, __all__, normal, vec=False):
     __funcs['eos_mix'].GCEOSMIX.main_derivatives_and_departures = staticmethod(__funcs['main_derivatives_and_departures'])
 transform_complete_thermo(replaced, __funcs, __all__, normal, vec=False)
 
+'''Before jitclasses could be used on Activity models, numba would have to add:
+Support type call.
+Support class methods.
+Support class constants.
+
+This is not likely to happen.
+
+IdealSolution_spec = [('T', float64), ('N', int64), ('xs', float64[:]), ('scalar', boolean)]
+
+IdealSolutionNumba = jitclass(IdealSolution_spec)(thermo.numba.activity.IdealSolution)
+
+# activity.IdealSolution
+IdealSolutionNumba(T=300.0, xs=np.array([.2, .5]))
+'''
 
 
 globals().update(__funcs)

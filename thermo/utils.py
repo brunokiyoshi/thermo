@@ -40,7 +40,7 @@ Temperature Dependent
              calculate_derivative, T_dependent_property_derivative,
              calculate_integral, T_dependent_property_integral,
              calculate_integral_over_T, T_dependent_property_integral_over_T,
-             extrapolate, test_method_validity, calculate,
+             extrapolate, test_method_validity, calculate, from_JSON, as_JSON,
              interpolation_T, interpolation_T_inv, interpolation_property,  interpolation_property_inv, T_limits, all_methods
    :undoc-members:
 
@@ -83,12 +83,79 @@ import os
 from cmath import sqrt as csqrt
 from fluids.numerics import quad, brenth, newton, secant, linspace, polyint, polyint_over_x, derivative, polyder, horner, horner_and_der2, quadratic_from_f_ders, assert_close, numpy as np
 from fluids.constants import R
-from chemicals.utils import isnan, isinf, log, exp, ws_to_zs, zs_to_ws, e
+from chemicals.utils import PY37, isnan, isinf, log, exp, ws_to_zs, zs_to_ws, e
 from chemicals.utils import mix_multiple_component_flows, hash_any_primitive
 from chemicals.vapor_pressure import Antoine, Antoine_coeffs_from_point, Antoine_AB_coeffs_from_point, DIPPR101_ABC_coeffs_from_point
 from chemicals.dippr import EQ101
 from chemicals.phase_change import Watson, Watson_n
 
+
+BasicNumpyEncoder = None
+def build_numpy_encoder():
+    '''Create a basic numpy encoder for json applications. All np ints become
+    Python ints; numpy floats become python floats; and all arrays become
+    lists-of-lists of floats, ints, bools, or complexes according to Python's
+    rules.
+    '''
+    global BasicNumpyEncoder, json
+
+    import json
+    int_types = frozenset([np.short, np.ushort, np.intc, np.uintc, np.int_,
+                           np.uint, np.longlong, np.ulonglong])
+    float_types = frozenset([np.float16, np.single, np.double, np.longdouble,
+                             np.csingle, np.cdouble, np.clongdouble])
+    ndarray = np.ndarray
+    JSONEncoder = json.JSONEncoder
+
+    class BasicNumpyEncoder(JSONEncoder):
+        def default(self, obj):
+            t = type(obj)
+            if t is ndarray:
+                return obj.tolist()
+            elif t in int_types:
+                return int(obj)
+            elif t in float_types:
+                return float(obj)
+            return JSONEncoder.default(self, obj)
+
+def _load_orjson():
+    global orjson
+    import orjson
+
+def dump_json_np(obj, library='json'):
+    '''Serialization tool that handles numpy arrays. By default this will
+    use the standard library json, but this can also use orjson.'''
+    if library == 'json':
+        if BasicNumpyEncoder is None:
+            build_numpy_encoder()
+        return json.dumps(obj, cls=BasicNumpyEncoder)
+    elif library == 'orjson':
+        if orjson is None:
+            _load_orjson()
+        opt = orjson.OPT_SERIALIZE_NUMPY
+        return orjson.dumps(obj, option=opt)
+
+
+json_loaded = False
+def _load_json():
+    global json
+    import json
+    json_loaded = True
+
+global json, orjson
+orjson = None
+
+if PY37:
+    def __getattr__(name):
+        global json, json_loaded
+        if name == 'json':
+            import json
+            json_loaded = True
+            return json
+        raise AttributeError("module %s has no attribute %s" %(__name__, name))
+else:
+    import json
+    json_loaded = True
 
 NEGLIGIBLE = 'NEGLIGIBLE'
 DIPPR_PERRY_8E = 'DIPPR_PERRY_8E'
@@ -820,6 +887,9 @@ class TDependentProperty(object):
     '''Dictionary containing method: max_n, for use in methods which should
     only ever be fit to a `n` value equal to or less than `n`'''
 
+    pure_references = ()
+    pure_reference_types = ()
+
     def __copy__(self):
         return self
 
@@ -827,16 +897,39 @@ class TDependentProperty(object):
         # By default, share state among subsequent objects
         return self
 
+    def __eq__(self, other):
+        return self.__hash__() == other.__hash__()
+
+    hash_ignore_props = ('linear_extrapolation_coeffs', 'Antoine_AB_coeffs',
+                         'DIPPR101_ABC_coeffs', 'Watson_coeffs',
+                         'interp1d_extrapolators', 'prop_cached',
+                         'TP_cached', 'tabular_data_interpolators',
+                         'tabular_data_interpolators_P')
     def __hash__(self):
-        return hash_any_primitive([self.__class__, self.__dict__])
+        d = self.__dict__
+        # extrapolation values and interpolation objects should be ignored
+        temp_store = {}
+        for k in self.hash_ignore_props:
+            try:
+                temp_store[k] = d[k]
+                del d[k]
+            except:
+                pass
+
+        ans = hash_any_primitive((self.__class__, d))
+        d.update(temp_store)
+
+        return ans
 
     def __repr__(self):
         clsname = self.__class__.__name__
         base = '%s(' % (clsname)
         if self.CASRN:
             base += 'CASRN="%s", ' %(self.CASRN)
-        for k, v in self.kwargs.items():
-            base += '%s=%s, ' %(k, v)
+        for k in self.custom_args:
+            v = getattr(self, k)
+            if v is not None:
+                base += '%s=%s, ' %(k, v)
         base += 'extrapolation="%s", ' %(self.extrapolation)
         base += 'method="%s", ' %(self.method)
         if hasattr(self, 'poly_fit_Tmin') and self.poly_fit_Tmin is not None:
@@ -868,6 +961,120 @@ class TDependentProperty(object):
             self.prop_cached = self.T_dependent_property(T)
             self.T_cached = T
             return self.prop_cached
+
+    def as_JSON(self):
+        r'''Method to create a JSON serialization of the property model
+        which can be stored, and reloaded later.
+
+        Returns
+        -------
+        json_repr : str
+            Json representation, [-]
+
+        Notes
+        -----
+
+        Examples
+        --------
+        '''
+        # vaguely jsonpickle compatible
+        mod_name = self.__class__.__module__
+        d = self.__dict__
+        d["py/object"] = "%s.%s" %(mod_name, self.__class__.__name__)
+        d["json_version"] = 1
+
+        all_methods_list = list(d['all_methods'])
+        all_methods_set = d['all_methods']
+        d['all_methods'] = all_methods_list
+        tabular_data_interpolators = d['tabular_data_interpolators']
+        d['tabular_data_interpolators'] = {}
+
+        if hasattr(self, 'all_methods_P'):
+            all_methods_P_list = list(d['all_methods_P'])
+            all_methods_P_set = d['all_methods_P']
+            d['all_methods_P'] = all_methods_P_list
+            tabular_data_interpolators_P = d['tabular_data_interpolators_P']
+            d['tabular_data_interpolators_P'] = {}
+
+        prop_references = []
+        for name in self.pure_references:
+            prop_obj = getattr(self, name)
+            prop_references.append(prop_obj)
+            if prop_obj is not None and type(prop_obj) not in (float, int):
+                d[name] = prop_obj.as_JSON()
+
+        CP_f = None
+        if hasattr(self, 'CP_f'):
+            CP_f = self.CP_f
+            d['CP_f'] = CP_f.CAS
+        if not json_loaded:
+            _load_json()
+        #print(self.__dict__)
+        ans = json.dumps(d)
+
+        # Set the dictionary back
+        del d["py/object"]
+        del d["json_version"]
+        d['all_methods'] = all_methods_set
+        if hasattr(self, 'all_methods_P'):
+            d['all_methods_P'] = all_methods_P_set
+            d['tabular_data_interpolators_P'] = tabular_data_interpolators_P
+        if CP_f is not None:
+            d['CP_f'] = CP_f
+        for name, obj in zip(self.pure_references, prop_references):
+            d[name] = obj
+
+        d['tabular_data_interpolators'] = tabular_data_interpolators
+
+        return ans
+
+    @classmethod
+    def from_JSON(cls, json_repr):
+        r'''Method to create a property model from a JSON
+        serialization of another property model.
+
+        Parameters
+        ----------
+        json_repr : str
+            JSON representation, [-]
+
+        Returns
+        -------
+        model : :obj:`TDependentProperty` or :obj:`TPDependentProperty`
+            Newly created object from the json serialization, [-]
+
+        Notes
+        -----
+        It is important that the input string be in the same format as that
+        created by :obj:`TDependentProperty.as_JSON`.
+
+        Examples
+        --------
+        '''
+        if not json_loaded:
+            _load_json()
+        d = json.loads(json_repr)
+        if 'CP_f' in d:
+            from thermo.coolprop import coolprop_fluids
+            d['CP_f'] = coolprop_fluids[d['CP_f']]
+
+        d['all_methods'] = set(d['all_methods'])
+        if 'all_methods_P' in d:
+            d['all_methods_P'] = set(d['all_methods_P'])
+
+        T_limits = d['T_limits']
+        for k, v in T_limits.items():
+            T_limits[k] = tuple(v)
+        tabular_data = d['tabular_data']
+        for k, v in tabular_data.items():
+            tabular_data[k] = tuple(v)
+
+
+        del d['py/object']
+        del d["json_version"]
+        new = cls.__new__(cls)
+        new.__dict__ = d
+        return new
 
     def _set_common_attributes(self):
 
@@ -1816,7 +2023,7 @@ class TDependentProperty(object):
                     d_high = self._calculate_derivative_transformed(T=Tmax, method=method, order=1)
                 except:
                     v_high, d_high = None, None
-                linear_extrapolation_coeffs[method] = (v_low, d_low, v_high, d_high)
+                linear_extrapolation_coeffs[method] = [v_low, d_low, v_high, d_high]
             elif extrapolation == 'AntoineAB':
                 try:
                     Antoine_AB_coeffs = self.Antoine_AB_coeffs
@@ -1837,7 +2044,7 @@ class TDependentProperty(object):
                     AB_high = Antoine_AB_coeffs_from_point(T=Tmax, Psat=v_high, dPsat_dT=d_high, base=e)
                 except:
                     AB_high = None
-                Antoine_AB_coeffs[method] = (AB_low, AB_high)
+                Antoine_AB_coeffs[method] = [AB_low, AB_high]
             elif extrapolation == 'DIPPR101_ABC':
                 try:
                     DIPPR101_ABC_coeffs = self.DIPPR101_ABC_coeffs
@@ -1860,7 +2067,7 @@ class TDependentProperty(object):
                     DIPPR101_ABC_high = DIPPR101_ABC_coeffs_from_point(Tmax, v_high, d0_high, d1_high)
                 except:
                     DIPPR101_ABC_high = None
-                DIPPR101_ABC_coeffs[method] = (DIPPR101_ABC_low, DIPPR101_ABC_high)
+                DIPPR101_ABC_coeffs[method] = [DIPPR101_ABC_low, DIPPR101_ABC_high]
             elif extrapolation == 'Watson':
                 try:
                     Watson_coeffs = self.Watson_coeffs
@@ -1882,7 +2089,7 @@ class TDependentProperty(object):
                     n_high = Watson_n(Tmax, Tmax-delta, v0_high, v1_high, self.Tc)
                 except:
                     v0_high, v1_high, n_high = None, None, None
-                Watson_coeffs[method] = (v0_low, n_low, v0_high, n_high)
+                Watson_coeffs[method] = [v0_low, n_low, v0_high, n_high]
             elif extrapolation == 'interp1d':
                 from scipy.interpolate import interp1d
                 try:
@@ -2903,6 +3110,9 @@ class MixtureProperty(object):
     _correct_pressure_pure = True
     _method = None
 
+    pure_references = ()
+    pure_reference_types = ()
+
     skip_prop_validity_check = False
     '''Flag to disable checking the output of the value. Saves a little time.
     '''
@@ -2923,6 +3133,94 @@ class MixtureProperty(object):
                                [i.poly_fit_Tmax_value for i in pure_objs],
                                [i.poly_fit_coeffs for i in pure_objs]]
 
+    def __eq__(self, other):
+        return self.__hash__() == other.__hash__()
+
+    def __hash__(self):
+        d = self.__dict__
+        ans = hash_any_primitive((self.__class__, d))
+        return ans
+
+    def as_JSON(self):
+        r'''Method to create a JSON serialization of the mixture property
+        which can be stored, and reloaded later.
+
+        Returns
+        -------
+        json_repr : str
+            Json representation, [-]
+
+        Notes
+        -----
+
+        Examples
+        --------
+        '''
+        if not json_loaded:
+            _load_json()
+
+        d = self.__dict__ # Not a the real object dictionary
+        mod_name = self.__class__.__module__
+        pure_references = [d[k] for k in self.pure_references]
+        for i, k in enumerate(self.pure_references):
+            d[k] = [v.as_JSON() for v in pure_references[i]]
+        del d['pure_objs']
+
+        d["py/object"] = "%s.%s" %(mod_name, self.__class__.__name__)
+        all_methods = d['all_methods']
+        d['all_methods'] = list(all_methods)
+
+
+        d['json_version'] = 1
+        ans = json.dumps(d)
+        del d['json_version']
+        del d["py/object"]
+        for i, k in enumerate(self.pure_references):
+            d[k] = pure_references[i]
+        # First reference must be the common one
+        d['pure_objs'] = pure_references[0]
+        d['all_methods'] = all_methods
+        return ans
+
+    @classmethod
+    def from_JSON(cls, string):
+        r'''Method to create a MixtureProperty from a JSON
+        serialization of another MixtureProperty.
+
+        Parameters
+        ----------
+        json_repr : str
+            Json representation, [-]
+
+        Returns
+        -------
+        constants : :obj:`MixtureProperty`
+            Newly created object from the json serialization, [-]
+
+        Notes
+        -----
+        It is important that the input string be in the same format as that
+        created by :obj:`MixtureProperty.as_JSON`.
+
+        Examples
+        --------
+        '''
+        if json is None:
+            get_json()
+        d = json.loads(string)
+        d['all_methods'] = set(d['all_methods'])
+        for k, sub_cls in zip(cls.pure_references, cls.pure_reference_types):
+            sub_jsons = d[k]
+            d[k] = [sub_cls.from_JSON(j) for j in sub_jsons]
+
+        d['pure_objs'] = d[cls.pure_references[0]]
+
+        del d['py/object']
+        del d["json_version"]
+        new = cls.__new__(cls)
+        new.__dict__ = d
+        return new
+
     @property
     def method(self):
         r'''Method to set the T, P, and composition dependent property method
@@ -2934,7 +3232,7 @@ class MixtureProperty(object):
     @method.setter
     def method(self, method):
         self._method = method
-        self.TP_zs_ws_cached = (None, None, None, None)
+        self.TP_zs_ws_cached = [None, None, None, None]
 
     @property
     def correct_pressure_pure(self):
@@ -2948,7 +3246,7 @@ class MixtureProperty(object):
     def correct_pressure_pure(self, v):
         if v != self._correct_pressure_pure:
             self._correct_pressure_pure = v
-            self.TP_zs_ws_cached = (None, None, None, None)
+            self.TP_zs_ws_cached = [None, None, None, None]
 
     def _complete_zs_ws(self, zs, ws):
         if zs is None and ws is None:
@@ -2988,7 +3286,7 @@ class MixtureProperty(object):
             return self.prop_cached
         else:
             self.prop_cached = self.mixture_property(T, P, zs, ws)
-            self.TP_zs_ws_cached = (T, P, zs, ws)
+            self.TP_zs_ws_cached = [T, P, zs, ws]
             return self.prop_cached
 
     @classmethod

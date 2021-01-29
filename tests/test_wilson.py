@@ -106,6 +106,9 @@ def test_DDBST_example():
     # Test __repr__ contains the needed information
     assert eval(str(GE)).GE() == GE.GE()
 
+    GE2 = Wilson.from_JSON(GE.as_JSON())
+    assert GE2.__dict__ == GE.__dict__
+
     gammas_expect = [1.223393433488855, 1.1009459024701462, 1.2052899281172034]
     assert_close1d(GE.gammas(), gammas_expect, rtol=1e-12)
     assert_close1d(GibbsExcess.gammas(GE), gammas_expect)
@@ -403,6 +406,9 @@ def test_DDBST_example():
     assert_close2d(d2nGE_dninjs_analytical, d2nGE_dninjs_expect, rtol=1e-12)
     assert_close2d(d2nGE_dninjs_numerical, d2nGE_dninjs_analytical, rtol=1e-4)
 
+    # Test with some results stored
+    GE2 = Wilson.from_JSON(GE.as_JSON())
+    assert GE2.__dict__ == GE.__dict__
 
 def test_multicomnent_madeup():
     T=273.15+70
@@ -593,3 +599,35 @@ def test_multicomponent_madeup_sympy():
     assert_allclose(GE.dlambdas_dT(), dlambdas_dT_sym, rtol=2e-15)
     assert_allclose(GE.d2lambdas_dT2(), d2lambdas_dT2_sym, rtol=4e-15)
     assert_allclose(GE.d3lambdas_dT3(), d3lambdas_dT3_sym, rtol=1e-14)
+
+
+def test_lambdas_performance_np():
+    return # not used yet
+    N = 3
+    A = np.random.random((N, N))
+    B = np.random.random((N, N))*-3000
+    D = np.random.random((N, N))*-1e-3
+
+    C = np.random.random((N, N))*1e-6
+    E = np.random.random((N, N))*1e-7
+    F = np.random.random((N, N))*1e-8
+    T = 300.0
+    xs = np.abs(np.random.random(N))
+    xs = xs/xs.sum()
+
+    GE = Wilson(T=T, xs=xs, ABCDEF=(A, B, C, D, E, F))
+
+
+def test_lambdas_performance_py():
+    return # not used yet
+    from random import random
+    import thermo
+    N = 3
+    A = [[random() for _ in range(N)] for _ in range(N)]
+    B = [[random()*-3000.0 for _ in range(N)] for _ in range(N)]
+    D = [[random()*-1e-3 for _ in range(N)] for _ in range(N)]
+    C = [[random()*1e-6 for _ in range(N)] for _ in range(N)]
+    E = [[random()*1e-7 for _ in range(N)] for _ in range(N)]
+    F = [[random()*1e-8 for _ in range(N)] for _ in range(N)]
+    out = [[0.0]*N for _ in range(N)]
+    thermo.wilson.interaction_exp(400.0, N, A, B, C, D, E, F, out)

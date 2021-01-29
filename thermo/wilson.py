@@ -48,10 +48,163 @@ Wilson Functional Calculations
 from __future__ import division
 from math import log, exp
 from fluids.constants import R
-from thermo.activity import GibbsExcess
+from fluids.numerics import numpy as np
+from thermo.activity import GibbsExcess, interaction_exp, dinteraction_exp_dT, d2interaction_exp_dT2, d3interaction_exp_dT3
+
+try:
+    zeros, npsum, nplog = np.zeros, np.sum, np.log
+except AttributeError:
+    pass
 
 __all__ = ['Wilson', 'Wilson_gammas']
 
+
+def wilson_xj_Lambda_ijs(xs, lambdas, N, xj_Lambda_ijs=None):
+    if xj_Lambda_ijs is None:
+        xj_Lambda_ijs = [0.0]*N
+    for i in range(N):
+        tot = 0.0
+        lambdasi = lambdas[i]
+        for j in range(N):
+            tot += xs[j]*lambdasi[j]
+        xj_Lambda_ijs[i] = tot
+    return xj_Lambda_ijs
+
+def wilson_dGE_dT(xs, T, GE, N, xj_Lambda_ijs_inv, xj_dLambda_dTijs):
+    tot = GE/T
+
+    sum1 = 0.0
+    for i in range(N):
+        sum1 += xs[i]*xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i]
+    tot -= T*R*sum1
+    return tot
+
+def wilson_d2GE_dT2(xs, T, N, xj_Lambda_ijs_inv, xj_dLambda_dTijs, xj_d2Lambda_dT2ijs):
+    sum0, sum1 = 0.0, 0.0
+    for i in range(N):
+        t = xs[i]*xj_Lambda_ijs_inv[i]
+        t2 = xj_dLambda_dTijs[i]*t
+        sum1 += t2
+
+        sum0 += t*(xj_d2Lambda_dT2ijs[i] - xj_dLambda_dTijs[i]*xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i])
+
+    d2GE_dT2 = -R*(T*sum0 + 2.0*sum1)
+    return d2GE_dT2
+
+def wilson_d3GE_dT3(xs, T, N, xj_Lambda_ijs_inv, xj_dLambda_dTijs, xj_d2Lambda_dT2ijs, xj_d3Lambda_dT3ijs):
+    #Term is directly from the one above it
+    sum0 = 0.0
+    for i in range(N):
+        sum0 += xj_Lambda_ijs_inv[i]*xs[i]*(xj_d2Lambda_dT2ijs[i]
+                - xj_dLambda_dTijs[i]*xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i])
+
+    sum_d3 = 0.0
+    for i in range(N):
+        sum_d3 += xs[i]*xj_d3Lambda_dT3ijs[i]*xj_Lambda_ijs_inv[i]
+
+    sum_comb = 0.0
+    for i in range(N):
+        sum_comb += xs[i]*xj_d2Lambda_dT2ijs[i]*xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i]*xj_Lambda_ijs_inv[i]
+    sum_comb *= 3.0
+
+    sum_last = 0.0
+    for i in range(N):
+        v = xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i]
+        sum_last += xs[i]*v*v*v
+    sum_last *= 2.0
+
+    d3GE_dT3 = -R*(3.0*sum0 + T*(sum_d3 - sum_comb + sum_last))
+    return d3GE_dT3
+
+def wilson_d2GE_dTdxs(xs, T, N, log_xj_Lambda_ijs, lambdas, dlambdas_dT,
+                      xj_Lambda_ijs_inv, xj_dLambda_dTijs, d2GE_dTdxs=None):
+    if d2GE_dTdxs is None:
+        d2GE_dTdxs = [0.0]*N
+
+    for i in range(N):
+        tot1 = xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i]
+        tot2 = 0.0
+        for j in range(N):
+            t1 = lambdas[j][i]*xj_Lambda_ijs_inv[j]
+            tot1 += xs[j]*xj_Lambda_ijs_inv[j]*(dlambdas_dT[j][i] - xj_dLambda_dTijs[j]*t1)
+            tot2 += xs[j]*t1
+
+        dG = -R*(T*tot1 + log_xj_Lambda_ijs[i] + tot2)
+
+        d2GE_dTdxs[i] = dG
+
+    return d2GE_dTdxs
+
+def wilson_dGE_dxs(xs, T, N, log_xj_Lambda_ijs, lambdas, xj_Lambda_ijs_inv, dGE_dxs=None):
+    if dGE_dxs is None:
+        dGE_dxs = [0.0]*N
+    mRT = -T*R
+    for k in range(N):
+        tot = log_xj_Lambda_ijs[k]
+        for i in range(N):
+            tot += xs[i]*lambdas[i][k]*xj_Lambda_ijs_inv[i]
+        dGE_dxs[k] = mRT*tot
+    return dGE_dxs
+
+def wilson_d2GE_dxixjs(xs, T, N, lambdas, xj_Lambda_ijs_inv, d2GE_dxixjs=None):
+    if d2GE_dxixjs is None:
+        d2GE_dxixjs = [[0.0]*N for i in range(N)] # numba: delete
+#        d2GE_dxixjs = zeros((N, N)) # numba: uncomment
+
+    RT = R*T
+    for k in range(N):
+        dG_row = d2GE_dxixjs[k]
+        for m in range(N):
+            tot = 0.0
+            for i in range(N):
+                tot += xs[i]*lambdas[i][k]*lambdas[i][m]*(xj_Lambda_ijs_inv[i]*xj_Lambda_ijs_inv[i])
+            tot -= lambdas[k][m]*xj_Lambda_ijs_inv[k]
+            tot -= lambdas[m][k]*xj_Lambda_ijs_inv[m]
+            dG_row[m] = RT*tot
+
+    return d2GE_dxixjs
+
+def wilson_d3GE_dxixjxks(xs, T, N, lambdas, xj_Lambda_ijs_inv, d3GE_dxixjxks=None):
+    if d3GE_dxixjxks is None:
+        d3GE_dxixjxks = [[[0.0]*N for i in range(N)] for _ in range(N)]# numba: delete
+#        d3GE_dxixjxks = zeros((N, N, N)) # numba: uncomment
+
+    nRT = -R*T
+    for k in range(N):
+        dG_matrix = d3GE_dxixjxks[k]
+        for m in range(N):
+            dG_row = dG_matrix[m]
+            for n in range(N):
+                tot = 0.0
+                for i in range(N):
+                    num = xs[i]*lambdas[i][k]*lambdas[i][m]*lambdas[i][n]
+                    den = xj_Lambda_ijs_inv[i]*xj_Lambda_ijs_inv[i]*xj_Lambda_ijs_inv[i]
+                    tot += num*den
+                tot *= 2.0
+
+                tot -= lambdas[k][m]*lambdas[k][n]*xj_Lambda_ijs_inv[k]*xj_Lambda_ijs_inv[k]
+                tot -= lambdas[m][k]*lambdas[m][n]*xj_Lambda_ijs_inv[m]*xj_Lambda_ijs_inv[m]
+                tot -= lambdas[n][m]*lambdas[n][k]*xj_Lambda_ijs_inv[n]*xj_Lambda_ijs_inv[n]
+                dG_row[n] = nRT*tot
+
+    return d3GE_dxixjxks
+
+def wilson_gammas(xs, N, lambdas, xj_Lambda_ijs_inv, gammas=None, vec0=None):
+    if gammas is None:
+        gammas = [0.0]*N
+    if vec0 is None:
+        vec0 = [0.0]*N
+
+    for i in range(N):
+        vec0[i] = xs[i]*xj_Lambda_ijs_inv[i]
+
+    for i in range(N):
+        tot2 = 1.0
+        for j in range(N):
+            tot2 -= lambdas[j][i]*vec0[j]
+        gammas[i] = exp(tot2)*xj_Lambda_ijs_inv[i]
+
+    return gammas
 
 class Wilson(GibbsExcess):
     r'''Class for representing an a liquid with excess gibbs energy represented
@@ -298,7 +451,6 @@ class Wilson(GibbsExcess):
         self.T = T
         self.xs = xs
         self.scalar = scalar = type(xs) is list
-        self.lambda_coeffs = lambda_coeffs
         if ABCDEF is not None:
             (self.lambda_coeffs_A, self.lambda_coeffs_B, self.lambda_coeffs_C,
             self.lambda_coeffs_D, self.lambda_coeffs_E, self.lambda_coeffs_F) = ABCDEF
@@ -319,7 +471,6 @@ class Wilson(GibbsExcess):
                 self.lambda_coeffs_E = None
                 self.lambda_coeffs_F = None
             self.N = N = len(lambda_coeffs)
-        self.cmps = range(N)
 
     def __repr__(self):
         s = '%s(T=%s, xs=%s, ABCDEF=%s)' %(self.__class__.__name__, repr(self.T), repr(self.xs),
@@ -355,7 +506,6 @@ class Wilson(GibbsExcess):
         new.xs = xs
         new.scalar = self.scalar
         new.N = self.N
-        new.cmps = self.cmps
         (new.lambda_coeffs_A, new.lambda_coeffs_B, new.lambda_coeffs_C,
          new.lambda_coeffs_D, new.lambda_coeffs_E, new.lambda_coeffs_F) = (
                  self.lambda_coeffs_A, self.lambda_coeffs_B, self.lambda_coeffs_C,
@@ -404,35 +554,11 @@ class Wilson(GibbsExcess):
             return self._lambdas
         except AttributeError:
             pass
-        # 87% of the time of this routine is the exponential.
-        lambda_coeffs_A = self.lambda_coeffs_A
-        lambda_coeffs_B = self.lambda_coeffs_B
-        lambda_coeffs_C = self.lambda_coeffs_C
-        lambda_coeffs_D = self.lambda_coeffs_D
-        lambda_coeffs_E = self.lambda_coeffs_E
-        lambda_coeffs_F = self.lambda_coeffs_F
-        T = self.T
-        cmps = self.cmps
 
-        T2 = T*T
-        Tinv = 1.0/T
-        T2inv = Tinv*Tinv
-        logT = log(T)
-
-        self._lambdas = lambdas = []
-        for i in cmps:
-            lambda_coeffs_Ai = lambda_coeffs_A[i]
-            lambda_coeffs_Bi = lambda_coeffs_B[i]
-            lambda_coeffs_Ci = lambda_coeffs_C[i]
-            lambda_coeffs_Di = lambda_coeffs_D[i]
-            lambda_coeffs_Ei = lambda_coeffs_E[i]
-            lambda_coeffs_Fi = lambda_coeffs_F[i]
-            lambdasi = [exp(lambda_coeffs_Ai[j] + lambda_coeffs_Bi[j]*Tinv
-                        + lambda_coeffs_Ci[j]*logT + lambda_coeffs_Di[j]*T
-                        + lambda_coeffs_Ei[j]*T2inv + lambda_coeffs_Fi[j]*T2)
-                        for j in cmps]
-            lambdas.append(lambdasi)
-
+        lambdas = interaction_exp(self.T, self.N, self.lambda_coeffs_A, self.lambda_coeffs_B,
+                                  self.lambda_coeffs_C, self.lambda_coeffs_D,
+                                  self.lambda_coeffs_E, self.lambda_coeffs_F)
+        self._lambdas = lambdas
         return lambdas
 
     def dlambdas_dT(self):
@@ -460,36 +586,18 @@ class Wilson(GibbsExcess):
         except AttributeError:
             pass
 
-        lambda_coeffs_B = self.lambda_coeffs_B
-        lambda_coeffs_C = self.lambda_coeffs_C
-        lambda_coeffs_D = self.lambda_coeffs_D
-        lambda_coeffs_E = self.lambda_coeffs_E
-        lambda_coeffs_F = self.lambda_coeffs_F
+        B = self.lambda_coeffs_B
+        C = self.lambda_coeffs_C
+        D = self.lambda_coeffs_D
+        E = self.lambda_coeffs_E
+        F = self.lambda_coeffs_F
 
-        T, cmps = self.T, self.cmps
+        T, N = self.T, self.N
         try:
             lambdas = self._lambdas
         except AttributeError:
             lambdas = self.lambdas()
-        self._dlambdas_dT = dlambdas_dT = []
-
-        T2 = T + T
-        Tinv = 1.0/T
-        nT2inv = -Tinv*Tinv
-        nT3inv2 = 2.0*nT2inv*Tinv
-
-        for i in cmps:
-            lambdasi = lambdas[i]
-            lambda_coeffs_Bi = lambda_coeffs_B[i]
-            lambda_coeffs_Ci = lambda_coeffs_C[i]
-            lambda_coeffs_Di = lambda_coeffs_D[i]
-            lambda_coeffs_Ei = lambda_coeffs_E[i]
-            lambda_coeffs_Fi = lambda_coeffs_F[i]
-            dlambdas_dTi = [(T2*lambda_coeffs_Fi[j] + lambda_coeffs_Di[j]
-                             + lambda_coeffs_Ci[j]*Tinv + lambda_coeffs_Bi[j]*nT2inv
-                             + lambda_coeffs_Ei[j]*nT3inv2)*lambdasi[j]
-                            for j in cmps]
-            dlambdas_dT.append(dlambdas_dTi)
+        self._dlambdas_dT = dlambdas_dT = dinteraction_exp_dT(T, N, B, C, D, E, F, lambdas)
         return dlambdas_dT
 
     def d2lambdas_dT2(self):
@@ -519,11 +627,7 @@ class Wilson(GibbsExcess):
             return self._d2lambdas_dT2
         except AttributeError:
             pass
-        lambda_coeffs_B = self.lambda_coeffs_B
-        lambda_coeffs_C = self.lambda_coeffs_C
-        lambda_coeffs_E = self.lambda_coeffs_E
-        lambda_coeffs_F = self.lambda_coeffs_F
-        T, cmps = self.T, self.cmps
+        T, N = self.T, self.N
 
         try:
             lambdas = self._lambdas
@@ -533,25 +637,11 @@ class Wilson(GibbsExcess):
             dlambdas_dT = self._dlambdas_dT
         except AttributeError:
             dlambdas_dT = self.dlambdas_dT()
-
-        Tinv = 1.0/T
-        nT2inv = -Tinv*Tinv
-        T3inv2 = -2.0*nT2inv*Tinv
-        T4inv6 = 3.0*T3inv2*Tinv
-
-        self._d2lambdas_dT2 = d2lambdas_dT2s = []
-        for i in cmps:
-            lambdasi = lambdas[i]
-            dlambdas_dTi = dlambdas_dT[i]
-            lambda_coeffs_Bi = lambda_coeffs_B[i]
-            lambda_coeffs_Ci = lambda_coeffs_C[i]
-            lambda_coeffs_Ei = lambda_coeffs_E[i]
-            lambda_coeffs_Fi = lambda_coeffs_F[i]
-            d2lambdas_dT2i = [(2.0*lambda_coeffs_Fi[j] + nT2inv*lambda_coeffs_Ci[j]
-                             + T3inv2*lambda_coeffs_Bi[j] + T4inv6*lambda_coeffs_Ei[j]
-                               )*lambdasi[j] + dlambdas_dTi[j]*dlambdas_dTi[j]/lambdasi[j]
-                             for j in cmps]
-            d2lambdas_dT2s.append(d2lambdas_dT2i)
+        self._d2lambdas_dT2 = d2lambdas_dT2s = d2interaction_exp_dT2(T, N, self.lambda_coeffs_B,
+                                                                     self.lambda_coeffs_C,
+                                                                     self.lambda_coeffs_E,
+                                                                     self.lambda_coeffs_F,
+                                                                     lambdas, dlambdas_dT)
         return d2lambdas_dT2s
 
     def d3lambdas_dT3(self):
@@ -584,7 +674,7 @@ class Wilson(GibbsExcess):
         except AttributeError:
             pass
 
-        T, cmps = self.T, self.cmps
+        T, N = self.T, self.N
         lambda_coeffs_B = self.lambda_coeffs_B
         lambda_coeffs_C = self.lambda_coeffs_C
         lambda_coeffs_E = self.lambda_coeffs_E
@@ -599,36 +689,7 @@ class Wilson(GibbsExcess):
         except AttributeError:
             dlambdas_dT = self.dlambdas_dT()
 
-        Tinv = 1.0/T
-        Tinv3 = 3.0*Tinv
-        nT2inv = -Tinv*Tinv
-        nT2inv05 = 0.5*nT2inv
-        T3inv = -nT2inv*Tinv
-        T3inv2 = T3inv+T3inv
-        T4inv3 = 1.5*T3inv2*Tinv
-        T2_12 = -12.0*nT2inv
-
-        self._d3lambdas_dT3 = d3lambdas_dT3s = []
-        for i in cmps:
-            lambdasi = lambdas[i]
-            dlambdas_dTi = dlambdas_dT[i]
-            lambda_coeffs_Bi = lambda_coeffs_B[i]
-            lambda_coeffs_Ci = lambda_coeffs_C[i]
-            lambda_coeffs_Ei = lambda_coeffs_E[i]
-            lambda_coeffs_Fi = lambda_coeffs_F[i]
-            d3lambdas_dT3is = []
-            for j in cmps:
-                term2 = (lambda_coeffs_Fi[j] + nT2inv05*lambda_coeffs_Ci[j]
-                         + T3inv*lambda_coeffs_Bi[j] + T4inv3*lambda_coeffs_Ei[j])
-
-                term3 = dlambdas_dTi[j]/lambdasi[j]
-
-                term4 = (T3inv2*(lambda_coeffs_Ci[j] - Tinv3*lambda_coeffs_Bi[j]
-                         - T2_12*lambda_coeffs_Ei[j]))
-
-                d3lambdas_dT3is.append((term3*(6.0*term2 + term3*term3) + term4)*lambdasi[j])
-
-            d3lambdas_dT3s.append(d3lambdas_dT3is)
+        self._d3lambdas_dT3 = d3lambdas_dT3s = d3interaction_exp_dT3(T, N, lambda_coeffs_B, lambda_coeffs_C, lambda_coeffs_E, lambda_coeffs_F, lambdas, dlambdas_dT)
         return d3lambdas_dT3s
 
     def xj_Lambda_ijs(self):
@@ -643,13 +704,7 @@ class Wilson(GibbsExcess):
         except AttributeError:
             lambdas = self.lambdas()
 
-        xs, cmps = self.xs, self.cmps
-        self._xj_Lambda_ijs = xj_Lambda_ijs = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += xs[j]*lambdas[i][j]
-            xj_Lambda_ijs.append(tot)
+        self._xj_Lambda_ijs = xj_Lambda_ijs = wilson_xj_Lambda_ijs(self.xs, lambdas, self.N)
         return xj_Lambda_ijs
 
     def xj_Lambda_ijs_inv(self):
@@ -664,7 +719,10 @@ class Wilson(GibbsExcess):
             xj_Lambda_ijs = self._xj_Lambda_ijs
         except AttributeError:
             xj_Lambda_ijs = self.xj_Lambda_ijs()
-        self._xj_Lambda_ijs_inv = [1.0/x for x in xj_Lambda_ijs]
+        if self.scalar:
+            self._xj_Lambda_ijs_inv = [1.0/x for x in xj_Lambda_ijs]
+        else:
+            self._xj_Lambda_ijs_inv = 1.0/xj_Lambda_ijs
         return self._xj_Lambda_ijs_inv
 
     def log_xj_Lambda_ijs(self):
@@ -678,7 +736,10 @@ class Wilson(GibbsExcess):
             xj_Lambda_ijs = self._xj_Lambda_ijs
         except AttributeError:
             xj_Lambda_ijs = self.xj_Lambda_ijs()
-        self._log_xj_Lambda_ijs = [log(i) for i in xj_Lambda_ijs]
+        if self.scalar:
+            self._log_xj_Lambda_ijs = [log(i) for i in xj_Lambda_ijs]
+        else:
+            self._log_xj_Lambda_ijs = nplog(xj_Lambda_ijs)
         return self._log_xj_Lambda_ijs
 
 
@@ -694,14 +755,8 @@ class Wilson(GibbsExcess):
         except AttributeError:
             dlambdas_dT = self.dlambdas_dT()
 
-        xs, cmps = self.xs, self.cmps
-        self._xj_dLambda_dTijs = xj_dLambda_dTijs = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += xs[j]*dlambdas_dT[i][j]
-            xj_dLambda_dTijs.append(tot)
-        return self._xj_dLambda_dTijs
+        self._xj_dLambda_dTijs = ans = wilson_xj_Lambda_ijs(self.xs, dlambdas_dT, self.N)
+        return ans
 
 
     def xj_d2Lambda_dT2ijs(self):
@@ -716,13 +771,7 @@ class Wilson(GibbsExcess):
         except AttributeError:
             d2lambdas_dT2 = self.d2lambdas_dT2()
 
-        xs, cmps = self.xs, self.cmps
-        self._xj_d2Lambda_dT2ijs = xj_d2Lambda_dT2ijs = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += xs[j]*d2lambdas_dT2[i][j]
-            xj_d2Lambda_dT2ijs.append(tot)
+        self._xj_d2Lambda_dT2ijs = xj_d2Lambda_dT2ijs = wilson_xj_Lambda_ijs(self.xs, d2lambdas_dT2, self.N)
         return xj_d2Lambda_dT2ijs
 
     def xj_d3Lambda_dT3ijs(self):
@@ -737,13 +786,7 @@ class Wilson(GibbsExcess):
         except AttributeError:
             d3lambdas_dT3 = self.d3lambdas_dT3()
 
-        xs, cmps = self.xs, self.cmps
-        self._xj_d3Lambda_dT3ijs = xj_d3Lambda_dT3ijs = []
-        for i in cmps:
-            tot = 0.0
-            for j in cmps:
-                tot += xs[j]*d3lambdas_dT3[i][j]
-            xj_d3Lambda_dT3ijs.append(tot)
+        self._xj_d3Lambda_dT3ijs = xj_d3Lambda_dT3ijs = wilson_xj_Lambda_ijs(self.xs, d3lambdas_dT3, self.N)
         return xj_d3Lambda_dT3ijs
 
 
@@ -772,11 +815,14 @@ class Wilson(GibbsExcess):
         except AttributeError:
             log_xj_Lambda_ijs = self.log_xj_Lambda_ijs()
 
-        T, xs, cmps = self.T, self.xs, self.cmps
-        GE = 0.0
-        for i in cmps:
-            GE += xs[i]*log_xj_Lambda_ijs[i]
-        self._GE = GE = -GE*R*T
+        if self.scalar:
+            xs, N = self.xs, self.N
+            GE = 0.0
+            for i in range(N):
+                GE += xs[i]*log_xj_Lambda_ijs[i]
+        else:
+            GE = float((self.xs*log_xj_Lambda_ijs).sum())
+        self._GE = GE = -GE*R*self.T
         return GE
 
     def dGE_dT(self):
@@ -822,8 +868,6 @@ class Wilson(GibbsExcess):
             return self._dGE_dT
         except AttributeError:
             pass
-        T, xs, cmps = self.T, self.xs, self.cmps
-
         try:
             xj_Lambda_ijs_inv = self._xj_Lambda_ijs_inv
         except AttributeError:
@@ -835,18 +879,11 @@ class Wilson(GibbsExcess):
             xj_dLambda_dTijs = self.xj_dLambda_dTijs()
 
         try:
-            tot = self._GE/T # First term
+            GE = self._GE
         except AttributeError:
-            tot = self.GE()/T # First term
-
-        # Second term
-        sum1 = 0.0
-        for i in cmps:
-            sum1 += xs[i]*xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i]
-        tot -= T*R*sum1
-
-        self._dGE_dT = tot
-        return tot
+            GE = self.GE()
+        self._dGE_dT = dGE_dT = wilson_dGE_dT(self.xs, self.T, GE, self.N, xj_Lambda_ijs_inv, xj_dLambda_dTijs)
+        return dGE_dT
 
     def d2GE_dT2(self):
         r'''Calculate and return the second temperature derivative of excess
@@ -872,7 +909,6 @@ class Wilson(GibbsExcess):
             return self._d2GE_dT2
         except AttributeError:
             pass
-        T, xs, cmps = self.T, self.xs, self.cmps
 
         try:
             xj_Lambda_ijs_inv = self._xj_Lambda_ijs_inv
@@ -888,16 +924,7 @@ class Wilson(GibbsExcess):
         except AttributeError:
             xj_d2Lambda_dT2ijs = self.xj_d2Lambda_dT2ijs()
 
-        # Last term, also the same term as last term of dGE_dT
-        sum0, sum1 = 0.0, 0.0
-        for i in cmps:
-            t = xs[i]*xj_Lambda_ijs_inv[i]
-            t2 = xj_dLambda_dTijs[i]*t
-            sum1 += t2
-
-            sum0 += t*(xj_d2Lambda_dT2ijs[i] - xj_dLambda_dTijs[i]*xj_dLambda_dTijs[i]*xj_Lambda_ijs_inv[i])
-
-        self._d2GE_dT2 = -R*(T*sum0 + 2.0*sum1)
+        self._d2GE_dT2 = wilson_d2GE_dT2(self.xs, self.T, self.N, xj_Lambda_ijs_inv, xj_dLambda_dTijs, xj_d2Lambda_dT2ijs)
         return self._d2GE_dT2
 
     def d3GE_dT3(self):
@@ -928,31 +955,13 @@ class Wilson(GibbsExcess):
         except AttributeError:
             pass
 
-        T, xs, cmps = self.T, self.xs, self.cmps
-        xj_Lambda_ijs = self.xj_Lambda_ijs()
+        xj_Lambda_ijs_inv = self.xj_Lambda_ijs_inv()
         xj_dLambda_dTijs = self.xj_dLambda_dTijs()
         xj_d2Lambda_dT2ijs = self.xj_d2Lambda_dT2ijs()
         xj_d3Lambda_dT3ijs = self.xj_d3Lambda_dT3ijs()
 
-        #Term is directly from the one above it
-        sum0 = 0.0
-        for i in cmps:
-            sum0 += (xs[i]*xj_d2Lambda_dT2ijs[i]/xj_Lambda_ijs[i]
-                    - xs[i]*(xj_dLambda_dTijs[i]*xj_dLambda_dTijs[i])/(xj_Lambda_ijs[i]*xj_Lambda_ijs[i]))
-
-        sum_d3 = 0.0
-        for i in cmps:
-            sum_d3 += xs[i]*xj_d3Lambda_dT3ijs[i]/xj_Lambda_ijs[i]
-
-        sum_comb = 0.0
-        for i in cmps:
-            sum_comb += 3.0*xs[i]*xj_d2Lambda_dT2ijs[i]*xj_dLambda_dTijs[i]/(xj_Lambda_ijs[i]*xj_Lambda_ijs[i])
-
-        sum_last = 0.0
-        for i in cmps:
-            sum_last += 2.0*xs[i]*(xj_dLambda_dTijs[i])**3/(xj_Lambda_ijs[i]*xj_Lambda_ijs[i]*xj_Lambda_ijs[i])
-
-        self._d3GE_dT3 = -R*(3.0*sum0 + T*(sum_d3 - sum_comb + sum_last))
+        self._d3GE_dT3 = wilson_d3GE_dT3(self.xs, self.T, self.N, xj_Lambda_ijs_inv, xj_dLambda_dTijs,
+                                          xj_d2Lambda_dT2ijs, xj_d3Lambda_dT3ijs)
         return self._d3GE_dT3
 
 
@@ -1006,21 +1015,10 @@ class Wilson(GibbsExcess):
         except AttributeError:
             xj_dLambda_dTijs = self.xj_dLambda_dTijs()
 
-        T, xs, cmps = self.T, self.xs, self.cmps
-
-        self._d2GE_dTdxs = d2GE_dTdxs = []
-        for k in cmps:
-            tot1 = xj_dLambda_dTijs[k]*xj_Lambda_ijs_inv[k]
-            tot2 = 0.0
-            for i in cmps:
-                t1 = lambdas[i][k]*xj_Lambda_ijs_inv[i]
-                tot1 += xs[i]*xj_Lambda_ijs_inv[i]*(dlambdas_dT[i][k]
-                                                   - xj_dLambda_dTijs[i]*t1)
-                tot2 += xs[i]*t1
-
-            dG = -R*(T*tot1 + log_xj_Lambda_ijs[k] + tot2)
-
-            d2GE_dTdxs.append(dG)
+        d2GE_dTdxs = wilson_d2GE_dTdxs(self.xs, self.T, self.N, log_xj_Lambda_ijs,
+                                       lambdas, dlambdas_dT,
+                                       xj_Lambda_ijs_inv, xj_dLambda_dTijs)
+        self._d2GE_dTdxs = d2GE_dTdxs
         return d2GE_dTdxs
 
 
@@ -1083,18 +1081,8 @@ class Wilson(GibbsExcess):
         except AttributeError:
             xj_Lambda_ijs_inv = self.xj_Lambda_ijs_inv()
 
-        T, xs, cmps = self.T, self.xs, self.cmps
-        mRT = -T*R
-
-        # k = what is being differentiated with respect to
-        self._dGE_dxs = dGE_dxs = []
-        for k in cmps:
-            tot = log_xj_Lambda_ijs[k]
-            for i in cmps:
-                tot += xs[i]*lambdas[i][k]*xj_Lambda_ijs_inv[i]
-
-            dGE_dxs.append(mRT*tot)
-
+        dGE_dxs = wilson_dGE_dxs(self.xs, self.T, self.N, log_xj_Lambda_ijs, lambdas, xj_Lambda_ijs_inv)
+        self._dGE_dxs = dGE_dxs
         return dGE_dxs
 
     def d2GE_dxixjs(self):
@@ -1121,8 +1109,6 @@ class Wilson(GibbsExcess):
         except AttributeError:
             pass
         # Correct, tested with hessian
-        T, xs, cmps = self.T, self.xs, self.cmps
-        RT = R*T
         try:
             lambdas = self._lambdas
         except AttributeError:
@@ -1132,18 +1118,8 @@ class Wilson(GibbsExcess):
         except AttributeError:
             xj_Lambda_ijs_inv = self.xj_Lambda_ijs_inv()
 
-
-        self._d2GE_dxixjs = d2GE_dxixjs = []
-        for k in cmps:
-            dG_row = []
-            for m in cmps:
-                tot = 0.0
-                for i in cmps:
-                    tot += xs[i]*lambdas[i][k]*lambdas[i][m]*(xj_Lambda_ijs_inv[i]*xj_Lambda_ijs_inv[i])
-                tot -= lambdas[k][m]*xj_Lambda_ijs_inv[k]
-                tot -= lambdas[m][k]*xj_Lambda_ijs_inv[m]
-                dG_row.append(RT*tot)
-            d2GE_dxixjs.append(dG_row)
+        d2GE_dxixjs = wilson_d2GE_dxixjs(self.xs, self.T, self.N, lambdas, xj_Lambda_ijs_inv)
+        self._d2GE_dxixjs = d2GE_dxixjs
         return d2GE_dxixjs
 
     def d3GE_dxixjxks(self):
@@ -1172,8 +1148,6 @@ class Wilson(GibbsExcess):
         except AttributeError:
             pass
         # Correct, tested with sympy expanding
-        T, xs, cmps = self.T, self.xs, self.cmps
-        nRT = -R*T
         lambdas = self.lambdas()
         try:
             xj_Lambda_ijs_inv = self._xj_Lambda_ijs_inv
@@ -1181,24 +1155,8 @@ class Wilson(GibbsExcess):
             xj_Lambda_ijs_inv = self.xj_Lambda_ijs_inv()
 
         # all the same: analytical[i][j][k] = analytical[i][k][j] = analytical[j][i][k] = analytical[j][k][i] = analytical[k][i][j] = analytical[k][j][i] = float(v)
-        self._d3GE_dxixjxks = d3GE_dxixjxks = []
-        for k in cmps:
-            dG_matrix = []
-            for m in cmps:
-                dG_row = []
-                for n in cmps:
-                    tot = 0.0
-                    for i in cmps:
-                        num = 2.0*xs[i]*lambdas[i][k]*lambdas[i][m]*lambdas[i][n]
-                        den = xj_Lambda_ijs_inv[i]*xj_Lambda_ijs_inv[i]*xj_Lambda_ijs_inv[i]
-                        tot += num*den
-
-                    tot -= lambdas[k][m]*lambdas[k][n]*xj_Lambda_ijs_inv[k]*xj_Lambda_ijs_inv[k]
-                    tot -= lambdas[m][k]*lambdas[m][n]*xj_Lambda_ijs_inv[m]*xj_Lambda_ijs_inv[m]
-                    tot -= lambdas[n][m]*lambdas[n][k]*xj_Lambda_ijs_inv[n]*xj_Lambda_ijs_inv[n]
-                    dG_row.append(nRT*tot)
-                dG_matrix.append(dG_row)
-            d3GE_dxixjxks.append(dG_matrix)
+        d3GE_dxixjxks = wilson_d3GE_dxixjxks(self.xs, self.T, self.N, lambdas, xj_Lambda_ijs_inv)
+        self._d3GE_dxixjxks = d3GE_dxixjxks
         return d3GE_dxixjxks
 
 
@@ -1209,7 +1167,7 @@ class Wilson(GibbsExcess):
             return self._gammas
         except AttributeError:
             pass
-        xs, cmps = self.xs, self.cmps
+#        xs, cmps = self.xs, self.cmps
         try:
             lambdas = self._lambdas
         except AttributeError:
@@ -1219,16 +1177,8 @@ class Wilson(GibbsExcess):
         except AttributeError:
             xj_Lambda_ijs_inv = self.xj_Lambda_ijs_inv()
 
-        xj_over_xj_Lambda_ijs = [xs[j]*xj_Lambda_ijs_inv[j] for j in cmps]
-
-        self._gammas = gammas = []
-        for i in cmps:
-            tot2 = 1.0
-            for j in cmps:
-                tot2 -= lambdas[j][i]*xj_over_xj_Lambda_ijs[j]
-#                tot2 -= lambdas[j][i]*xj_Lambda_ijs_inv[j]*xs[j]
-
-            gammas.append(exp(tot2)*xj_Lambda_ijs_inv[i])
+        gammas = wilson_gammas(self.xs, self.N, lambdas, xj_Lambda_ijs_inv)
+        self._gammas = gammas
         return gammas
 
 
